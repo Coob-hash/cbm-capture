@@ -10,7 +10,11 @@ import UniformTypeIdentifiers
 /// It intentionally accepts an `ImageTransform.Result` rather than loose parameters, so the
 /// rotation and output size applied to the pixels are provably the same ones applied to the
 /// intrinsics and to the worker's tap.
-struct PixelBufferRenderer: Sendable {
+/// `@unchecked` because of `ciContext`: `CIContext` is documented by Apple as thread-safe -
+/// multiple threads may share one and render through it concurrently - but it is not annotated
+/// `Sendable`, so the compiler cannot see that. The alternative, building a context per frame,
+/// is the well-known way to make an AR app stutter.
+struct PixelBufferRenderer: @unchecked Sendable {
 
     enum RenderError: Error, LocalizedError {
         case cannotCreateImage

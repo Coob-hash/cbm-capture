@@ -33,7 +33,11 @@ enum OutboxStatus: String, Codable, Sendable, CaseIterable {
 @Model
 final class OutboxRecord {
     /// Also the server's idempotency key, which is what makes blind retries safe.
-    #Unique<OutboxRecord>([\.captureID])
+    ///
+    /// No `#Unique` constraint: that macro requires iOS 18, and this app targets 17. Uniqueness
+    /// holds by construction anyway - each record is created with a freshly generated UUID and
+    /// the value is never rewritten - and the server enforces it independently through
+    /// `UNIQUE (source_system, source_file_id)`.
     var captureID: UUID = UUID()
 
     var createdAt: Date = Date()

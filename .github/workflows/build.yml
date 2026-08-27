@@ -78,8 +78,13 @@ jobs:
       # RealityKit compile for the simulator even though the AR session cannot run there —
       # which is exactly what is being checked here: that the code is correct, not that the
       # camera works on a machine with no camera.
+      # `set -o pipefail` is load-bearing, not boilerplate. GitHub runs steps with `bash -e`,
+      # which does NOT set pipefail, so the exit status of `xcodebuild | xcbeautify` is
+      # xcbeautify's - and xcbeautify exits 0 even when the build it just formatted failed.
+      # Without this line the job reports a green tick over `** BUILD FAILED **`.
       - name: Build
         run: |
+          set -o pipefail
           xcodebuild build \
             -project CBMCapture.xcodeproj \
             -scheme CBMCapture \
@@ -90,6 +95,7 @@ jobs:
 
       - name: Test
         run: |
+          set -o pipefail
           xcodebuild test \
             -project CBMCapture.xcodeproj \
             -scheme CBMCapture \

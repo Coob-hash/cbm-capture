@@ -216,10 +216,16 @@ extension JSONDecoder {
 }
 
 extension ISO8601DateFormatter {
-    static let captureContract: ISO8601DateFormatter = {
+    /// A fresh formatter per call, deliberately.
+    ///
+    /// `ISO8601DateFormatter` is a non-`Sendable` class, so a `static let` of one is shared
+    /// mutable state and Swift 6 rejects it outright. Allocating one per encode or decode costs
+    /// nothing at this volume - a handful per capture - and avoids either an
+    /// `nonisolated(unsafe)` escape hatch or a lock around something this cheap.
+    static var captureContract: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
-    }()
+    }
 }
