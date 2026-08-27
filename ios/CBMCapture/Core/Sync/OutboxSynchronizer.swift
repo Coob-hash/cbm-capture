@@ -63,7 +63,10 @@ actor OutboxSynchronizer {
         defer { isDraining = false }
 
         while true {
-            guard let claimed = try? await store.claimNextDue(), let next = claimed else { break }
+            // `try?` flattens: `claimNextDue()` throws and returns an Optional, and `try?` of
+            // that is a single Optional, not a nested one. Either outcome - an empty queue or a
+            // store error - means there is nothing more to send on this pass.
+            guard let next = try? await store.claimNextDue() else { break }
 
             let outcome = await client.upload(
                 metadataJSON: next.metadata,
