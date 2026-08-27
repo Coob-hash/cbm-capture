@@ -143,6 +143,70 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
+  server:
+    name: Server — migration, workflows, Code nodes
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cbm
+          POSTGRES_PASSWORD: cbm
+          POSTGRES_DB: cbm_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGPASSWORD: cbm
+      PSQL: psql -v ON_ERROR_STOP=1 -h localhost -U cbm -d cbm_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Applied to the real release-2026_07_13 schema, not a hand-made fixture, so a migration
+      # that only works against an imagined table shape fails here.
+      - name: Apply base schema and migration
+        working-directory: server/sql
+        run: |
+          $PSQL -q -f 000_base_schema.reference.sql
+          $PSQL -q -f 001_add_camera_intrinsics.sql
+          echo "--- re-applying to prove idempotency ---"
+          $PSQL -q -f 001_add_camera_intrinsics.sql
+
+      - name: Constraint tests
+        working-directory: server/sql
+        run: $PSQL -f tests/constraints_test.sql
+
+      - name: Staging query test
+        working-directory: server/sql
+        run: $PSQL -f tests/staging_test.sql
+
+      - name: Workflows are structurally sound
+        working-directory: server/n8n
+        run: python validate_workflows.py WF1_Capture_Intake.json WF2_EOD_AI_Agent_and_FM_Approval.json
+
+      - name: Code node behaviour
+        working-directory: server/n8n
+        run: node test_code_nodes.mjs
+
+      # The whole point of this change is that no fabricated calibration can reach the ray math.
+      - name: No CAMERA_* environment fallback survives
+        run: |
+          if grep -rn 'env\.CAMERA_' server/n8n/*.json; then
+            echo "::error::a \$env.CAMERA_* fallback is back in the workflows"
+            exit 1
+          fi
+          echo "no \$env.CAMERA_* references in the workflows"
+
   contract:
     name: Contract — schema and example agree
     runs-on: ubuntu-latest

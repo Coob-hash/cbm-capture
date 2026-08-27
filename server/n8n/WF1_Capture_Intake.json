@@ -1,0 +1,601 @@
+{
+  "name": "CBM WF1 - Capture Intake and Staging",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cbm/capture",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "options": {
+          "binaryPropertyName": "image",
+          "rawBody": false
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1080,
+        -220
+      ],
+      "id": "75429a77-1422-5070-b738-9750c008ed08",
+      "name": "Capture Webhook",
+      "webhookId": "8f1c3a10-2b44-4f0e-9a55-6a0f2d7c1e01"
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "image",
+        "dataPropertyName": "computed_sha256",
+        "encoding": "hex"
+      },
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        -860,
+        -220
+      ],
+      "id": "b778d198-d299-5b6c-88ee-4d7c3b6e015e",
+      "name": "Hash Uploaded Image"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst body = item.json.body ?? item.json ?? {};\nconst binary = item.binary ?? {};\n\nconst SCHEMA_VERSION = '1.0.0';\n\n// n8n puts multipart text fields on body and files on binary, keyed by the form field name.\nconst imageBinary = binary.image ?? binary.data ?? null;\n\nfunction fail(error, detail, http) {\n  return [{\n    json: {\n      validation: { ok: false, outcome: 'REJECT', http: http || 422, error, detail: detail || null },\n      capture_id: (typeof captureId !== 'undefined') ? captureId : null\n    },\n    binary: item.binary\n  }];\n}\n\nlet captureId = null;\n\n// 1. metadata parses\nlet meta;\ntry {\n  const raw = body.metadata;\n  meta = typeof raw === 'string' ? JSON.parse(raw) : raw;\n} catch (e) {\n  return fail('MALFORMED_METADATA', e.message, 400);\n}\nif (!meta || typeof meta !== 'object') {\n  return fail('MALFORMED_METADATA', 'metadata part is missing', 400);\n}\n\ncaptureId = meta.capture_id || null;\nif (!captureId) return fail('MALFORMED_METADATA', 'capture_id is required', 400);\n\n// 2. the app and this workflow agree on the contract\nif (meta.schema_version !== SCHEMA_VERSION) {\n  return fail('UNSUPPORTED_SCHEMA_VERSION', 'server speaks ' + SCHEMA_VERSION, 422);\n}\n\n// 3. an image actually arrived\nif (!imageBinary) return fail('MISSING_IMAGE', 'no image part in the request', 400);\n\n// 4. the bytes are the bytes the app hashed\nconst declared = (meta.image || {}).sha256;\nconst computed = item.json.computed_sha256;\nif (!declared) return fail('MALFORMED_METADATA', 'image.sha256 is required', 400);\nif (computed && String(computed).toLowerCase() !== String(declared).toLowerCase()) {\n  return fail('CHECKSUM_MISMATCH', 'declared ' + declared + ', computed ' + computed, 400);\n}\n\nconst camera = meta.camera || {};\nconst image = meta.image || {};\nconst target = (meta.target || {}).pixel || {};\n\n// 5. K, the pixels and the tap describe ONE frame.\n//\n// This is the whole point of the endpoint. A package that passes everything else and fails\n// here would unproject a pixel from one coordinate system using a principal point from\n// another - the defect this change exists to remove.\nconst problems = [];\nif (Number(camera.width) !== Number(image.width) || Number(camera.height) !== Number(image.height)) {\n  problems.push('K describes ' + camera.width + 'x' + camera.height +\n                ' but the image is ' + image.width + 'x' + image.height);\n}\nconst tx = Number(target.x), ty = Number(target.y);\nif (!Number.isFinite(tx) || !Number.isFinite(ty) ||\n    tx < 0 || ty < 0 || tx >= Number(image.width) || ty >= Number(image.height)) {\n  problems.push('target pixel (' + target.x + ', ' + target.y + ') is outside the image');\n}\nfor (const key of ['fx', 'fy', 'cx', 'cy']) {\n  if (!Number.isFinite(Number(camera[key])) || Number(camera[key]) <= 0) {\n    problems.push('camera.' + key + ' is not a positive number');\n  }\n}\nif (problems.length) return fail('FRAME_MISMATCH', problems.join('; '), 422);\n\n// 6. the building this endpoint serves\nconst expectedBuilding = $env.CBM_BUILDING_ID || 'ROOM-POC';\nif (meta.building_id && meta.building_id !== expectedBuilding) {\n  return fail('FRAME_MISMATCH', 'package is for building ' + meta.building_id +\n                                ' but this endpoint serves ' + expectedBuilding, 422);\n}\n\n// 7. trust. An untrusted package is still a real defect report and is still recorded - it is\n// routed for manual placement instead of being unprojected with a K nobody believes. This is\n// the fail-closed behaviour that replaces the old silent $env.CAMERA_FX fallback.\nconst trusted = camera.trusted === true;\n\nreturn [{\n  json: {\n    validation: {\n      ok: true,\n      outcome: trusted ? 'ACCEPT' : 'NEEDS_LOCALIZATION',\n      http: trusted ? 200 : 422,\n      error: trusted ? null : 'UNTRUSTED_INTRINSICS',\n      detail: trusted ? null : 'intrinsics were not trusted; routed for manual localization'\n    },\n    capture_id: captureId,\n    building_id: expectedBuilding,\n    reporter_email: meta.reporter_email || null,\n    reporter_description: meta.description || null,\n    captured_at: meta.captured_at || null,\n    image_sha256: declared,\n    image_mime_type: image.mime_type || 'image/jpeg',\n    request_status: trusted ? 'RECEIVED' : 'NEEDS_LOCALIZATION',\n    camera_intrinsics: camera,\n    target_pixel: Object.assign({}, target, { centrality: (meta.target || {}).centrality ?? null }),\n    capture_pose: meta.pose || null,\n    client: meta.client || null\n  },\n  binary: item.binary\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        -220
+      ],
+      "id": "c151b2f7-3890-5e1b-9532-d452e5bdac33",
+      "name": "Validate Capture Package"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "e1a1c1f0-0001-4a00-9000-000000000001",
+              "leftValue": "={{ $json.validation.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -420,
+        -220
+      ],
+      "id": "5b7bad30-8def-5ef6-9b1c-2704ac32e23c",
+      "name": "Package Acceptable?"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "inputDataFieldName": "image",
+        "name": "={{ $json.capture_id }}.jpg",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $env.INCOMING_DRIVE_FOLDER_ID }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -180,
+        -360
+      ],
+      "id": "9bdc074a-1f4e-5099-94c7-485fe98ea6cd",
+      "name": "Store Image in Drive"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inserted AS (\n  INSERT INTO maintenance_requests(\n    source_system, source_file_id, source_file_name, source_mime_type, source_web_url,\n    reporter_email, building_id, status,\n    camera_intrinsics, target_pixel, capture_pose, captured_at,\n    reporter_description, image_sha256\n  ) VALUES (\n    'mobile_app', $1, $2, $3, $4, $5, $6, $7::request_status,\n    $8::jsonb, $9::jsonb, $10::jsonb, $11::timestamptz, $12, $13\n  )\n  ON CONFLICT (source_system, source_file_id) DO NOTHING\n  RETURNING id, status\n), logged AS (\n  INSERT INTO ticket_events(request_id, event_type, actor, payload)\n  SELECT id, 'CAPTURE_RECEIVED', 'mobile_app',\n         jsonb_build_object('capture_id', $1,\n                            'intrinsics_source', ($8::jsonb)->>'source',\n                            'intrinsics_trusted', ($8::jsonb)->'trusted')\n  FROM inserted\n)\nSELECT i.id AS request_id, i.status::text AS status, false AS duplicate FROM inserted i\nUNION ALL\nSELECT r.id, r.status::text, true\n  FROM maintenance_requests r\n WHERE r.source_system = 'mobile_app' AND r.source_file_id = $1\n   AND NOT EXISTS (SELECT 1 FROM inserted);",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [ $('Validate Capture Package').first().json.capture_id, $('Validate Capture Package').first().json.capture_id + '.jpg', $('Validate Capture Package').first().json.image_mime_type, ($json.webViewLink || null), $('Validate Capture Package').first().json.reporter_email, $('Validate Capture Package').first().json.building_id, $('Validate Capture Package').first().json.request_status, JSON.stringify($('Validate Capture Package').first().json.camera_intrinsics), JSON.stringify($('Validate Capture Package').first().json.target_pixel), $('Validate Capture Package').first().json.capture_pose ? JSON.stringify($('Validate Capture Package').first().json.capture_pose) : null, $('Validate Capture Package').first().json.captured_at, $('Validate Capture Package').first().json.reporter_description, $('Validate Capture Package').first().json.image_sha256 ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        60,
+        -360
+      ],
+      "id": "0cce584e-802b-5ad6-a871-853b38cbdc0b",
+      "name": "Stage Capture Idempotently",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "e1a1c1f0-0002-4a00-9000-000000000002",
+              "leftValue": "={{ $('Validate Capture Package').first().json.validation.outcome === 'ACCEPT' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        280,
+        -360
+      ],
+      "id": "913445d6-ff7c-5937-8f63-a561c1dfa895",
+      "name": "Intrinsics Trusted?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staged = $input.first().json;\nconst v = $('Validate Capture Package').first().json;\nreturn [{ json: {\n  ok: true,\n  capture_id: v.capture_id,\n  request_id: staged.request_id || null,\n  status: staged.status || v.request_status,\n  duplicate: Boolean(staged.duplicate)\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        -460
+      ],
+      "id": "7a7b5dea-847e-57df-8f0f-38584a4089d0",
+      "name": "Build Accepted Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        740,
+        -460
+      ],
+      "id": "fdec1258-4b00-5e5a-8146-4b645640b0ac",
+      "name": "Respond Accepted"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok:false, error:'UNTRUSTED_INTRINSICS', detail: $('Validate Capture Package').first().json.validation.detail, capture_id: $('Validate Capture Package').first().json.capture_id } }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        520,
+        -260
+      ],
+      "id": "8662238c-2cce-5995-bb58-3dc70593abb9",
+      "name": "Respond Needs Localization"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO maintenance_requests(\n  source_system, source_file_id, source_file_name, building_id, status, failure_reason\n) VALUES ('mobile_app', $1, $2, $3, 'REJECTED_INPUT', $4)\nON CONFLICT (source_system, source_file_id) DO NOTHING\nRETURNING id, status;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [ ($json.capture_id || 'unknown-' + $execution.id), ($json.capture_id || 'unknown') + '.jpg', ($env.CBM_BUILDING_ID || 'ROOM-POC'), ($json.validation.error + ': ' + ($json.validation.detail || '')) ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -180,
+        -60
+      ],
+      "id": "cb859495-b932-587d-ab77-e8d8f9da8cb2",
+      "name": "Record Rejected Capture",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok:false, error: $('Validate Capture Package').first().json.validation.error, detail: $('Validate Capture Package').first().json.validation.detail, capture_id: $('Validate Capture Package').first().json.capture_id } }}",
+        "options": {
+          "responseCode": "={{ $('Validate Capture Package').first().json.validation.http }}"
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        60,
+        -60
+      ],
+      "id": "d4491660-2b0c-59d9-af4d-9bd2cedcf8fa",
+      "name": "Respond Rejected"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "cbm/capture/health",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1080,
+        160
+      ],
+      "id": "db2d9390-b8da-50bb-9ac0-b90c1408a848",
+      "name": "Health Webhook",
+      "webhookId": "8f1c3a10-2b44-4f0e-9a55-6a0f2d7c1e02"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok:true, building_id: ($env.CBM_BUILDING_ID || 'ROOM-POC'), schema_version: '1.0.0' } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -820,
+        160
+      ],
+      "id": "04118a85-1629-5d45-b672-d6fdc29ed921",
+      "name": "Respond Health"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cbm/manual-localization",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1080,
+        420
+      ],
+      "id": "198c0baf-25ba-5ab4-a1a6-732b69e40a22",
+      "name": "Manual Localization Webhook",
+      "webhookId": "d586585b-81a3-4300-96aa-195df25918fa"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ ($env.IFC_SERVICE_URL || 'http://ifc-service:8000') + '/elements/' + encodeURIComponent($json.body.ifc_global_id) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -830,
+        420
+      ],
+      "id": "d092c063-2ba4-5b6e-a4e6-53380a34cdbc",
+      "name": "Validate IFC GlobalId"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "1cc70629-9065-43ce-88ad-dd09c53639f7",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -600,
+        420
+      ],
+      "id": "4fc82780-7198-5043-95a9-c51d28ed7941",
+      "name": "GlobalId Valid?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE maintenance_requests\nSET manual_ifc_global_id=$2, status='RECEIVED', failure_reason=NULL, updated_at=now()\nWHERE id=$1::uuid AND status='NEEDS_LOCALIZATION'\nRETURNING id,status,manual_ifc_global_id;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$('Manual Localization Webhook').first().json.body.request_id,$('Manual Localization Webhook').first().json.body.ifc_global_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -360,
+        320
+      ],
+      "id": "d5f96065-84ef-56e2-87ae-92655ec8384c",
+      "name": "Requeue Manually Localized Request"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {ok:true, request:$json} }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -120,
+        320
+      ],
+      "id": "f2b95d49-2db5-5bd9-909d-b174c2145604",
+      "name": "Respond Manual Success"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {ok:false, error:'Invalid IFC GlobalId'} }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -360,
+        520
+      ],
+      "id": "30cc49c6-da93-50ee-b141-535dc654ddcb",
+      "name": "Respond Manual Failure"
+    }
+  ],
+  "connections": {
+    "Capture Webhook": {
+      "main": [
+        [
+          {
+            "node": "Hash Uploaded Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash Uploaded Image": {
+      "main": [
+        [
+          {
+            "node": "Validate Capture Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Capture Package": {
+      "main": [
+        [
+          {
+            "node": "Package Acceptable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Package Acceptable?": {
+      "main": [
+        [
+          {
+            "node": "Store Image in Drive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Rejected Capture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Image in Drive": {
+      "main": [
+        [
+          {
+            "node": "Stage Capture Idempotently",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage Capture Idempotently": {
+      "main": [
+        [
+          {
+            "node": "Intrinsics Trusted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intrinsics Trusted?": {
+      "main": [
+        [
+          {
+            "node": "Build Accepted Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Needs Localization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Accepted Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Rejected Capture": {
+      "main": [
+        [
+          {
+            "node": "Respond Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Localization Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate IFC GlobalId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate IFC GlobalId": {
+      "main": [
+        [
+          {
+            "node": "GlobalId Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GlobalId Valid?": {
+      "main": [
+        [
+          {
+            "node": "Requeue Manually Localized Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Manual Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requeue Manually Localized Request": {
+      "main": [
+        [
+          {
+            "node": "Respond Manual Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Rome",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "b8e562a4-6b4d-5028-98ba-533f90595ee9",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

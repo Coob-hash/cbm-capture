@@ -14,6 +14,7 @@ contract/       JSON Schema, OpenAPI 3.1, worked example   ← the shared truth
 docs/           the intrinsics specification
 ios/            Swift 6 · SwiftUI · ARKit · SwiftData
 android/        Kotlin 2.1 · Compose · ARCore · Room · Hilt · WorkManager
+server/         the n8n and PostgreSQL half: migration + both workflows
 mock-server/    FastAPI stand-in for the n8n webhook
 PRD.md          product requirements
 ```
@@ -134,12 +135,13 @@ That is the whole product. Everything else is a queue and four screens.
 
 ## Status
 
-All three CI jobs are green: <https://github.com/Coob-hash/cbm-capture/actions>
+All four CI jobs are green: <https://github.com/Coob-hash/cbm-capture/actions>
 
 | | |
 |---|---|
 | **Android** | Compiles (221 classes), **16/16 unit tests pass**, `app-debug.apk` 21.79 MB. |
 | **iOS** | Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`, **17/17 tests pass** on the simulator. |
+| **Server** | Migration applies to a real PostgreSQL 16 and is idempotent; 15 SQL assertions and 30 Code-node assertions pass. |
 | **Mock server** | Runs; 19/19 contract assertions across every rejection branch. |
 | **Contract** | Example validates against the schema; frame invariant holds. |
 
@@ -151,7 +153,11 @@ To build it yourself you need either that CI job, any Mac with Xcode 16+, or a r
 A **physical iPhone is still required to *run* it**: ARKit does not track in the Simulator, so
 CI proves the code compiles and its logic is correct, not that the camera path works.
 
-### Not included
+## Server
 
-The server side — the n8n WF1 webhook, the `camera_intrinsics jsonb` column, and the WF2
-rewiring — is specified in PRD § 10 but not implemented here. `mock-server/` stands in for it.
+`server/` holds the other half: the migration that adds `camera_intrinsics`, the new
+webhook-intake WF1, and the patched WF2 that reads K from the request instead of inventing it.
+See [`server/README.md`](server/README.md) for what changes and how to deploy it.
+
+`mock-server/` remains useful for app development — it implements the same contract without
+needing n8n, Postgres, or a MultiSet account.

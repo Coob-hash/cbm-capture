@@ -350,8 +350,9 @@ for settings, Retrofit/OkHttp for HTTP.
 
 ## 10. Server-side changes this app requires
 
-The app is inert without these. They are **not** implemented in this delivery — they are the
-n8n/Postgres half of the same design, listed here so the scope is explicit.
+**Implemented, in `server/`.** The migration is verified against a real PostgreSQL 16 with the
+release 2026_07_13 schema applied; the workflow Code nodes' JavaScript is executed against
+fixtures under Node. See `server/README.md` for deployment.
 
 | Component | Change |
 |-----------|--------|

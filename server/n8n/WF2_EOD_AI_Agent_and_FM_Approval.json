@@ -1,0 +1,1327 @@
+{
+  "name": "CBM WF2 - EOD AI Agent and FM Approval (device intrinsics)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 18 * * 1-5"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1300,
+        -180
+      ],
+      "id": "7fb8eb60-e66a-4bc7-90fa-2b86ed7ef568",
+      "name": "End-of-Day Schedule"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH batch AS (\n  INSERT INTO processing_batches(business_date,status)\n  VALUES (current_date,'PROCESSING')\n  ON CONFLICT DO NOTHING\n  RETURNING id\n), selected_batch AS (\n  SELECT id FROM batch\n  UNION ALL\n  SELECT id FROM processing_batches\n   WHERE business_date=current_date AND status='PROCESSING'\n  LIMIT 1\n), claimed AS (\n  UPDATE maintenance_requests r\n     SET status='CLAIMED', batch_id=(SELECT id FROM selected_batch), updated_at=now()\n   WHERE r.id IN (\n     SELECT id FROM maintenance_requests\n      WHERE status='RECEIVED'\n        AND EXISTS (SELECT 1 FROM selected_batch)\n      ORDER BY created_at\n      FOR UPDATE SKIP LOCKED\n      LIMIT 50\n   )\n  RETURNING r.*\n)\nSELECT (SELECT id FROM selected_batch) AS batch_id,\n       c.id AS request_id, c.source_file_id, c.source_file_name, c.source_web_url,\n       c.reporter_email, c.building_id, c.manual_ifc_global_id,\n       c.camera_intrinsics, c.target_pixel, false AS no_requests\n  FROM claimed c\nUNION ALL\nSELECT (SELECT id FROM selected_batch), NULL::uuid, NULL,NULL,NULL,NULL,NULL,NULL,\n       NULL::jsonb,NULL::jsonb,true\n WHERE NOT EXISTS (SELECT 1 FROM claimed);",
+        "options": {
+          "queryBatching": "single"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1080,
+        -180
+      ],
+      "id": "510bfc37-5d8e-4cab-9a1a-180d555a4300",
+      "name": "Claim Requests and Create Batch"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "8b894664-6663-4f34-b138-8864d4f7b401",
+              "leftValue": "={{ $json.no_requests }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -860,
+        -180
+      ],
+      "id": "2ae04afc-be9e-40de-a04a-219128f61c7a",
+      "name": "Requests Found?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        0
+      ],
+      "id": "be3c14a2-e8bd-496e-ad16-84fe93bf6583",
+      "name": "No Requests - Stop"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -620,
+        -300
+      ],
+      "id": "776e12f2-a1a6-40ed-a701-dbb3dd0cc75e",
+      "name": "Loop Requests"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.source_file_id }}",
+          "mode": "id"
+        },
+        "options": {
+          "binaryPropertyName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -380,
+        -500
+      ],
+      "id": "88b895a1-2775-4701-bda5-b81b11ab85dd",
+      "name": "Download Request Image"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nif (!item.binary?.data?.data) throw new Error('Image binary data is missing');\nconst buffer = Buffer.from(item.binary.data.data, 'base64');\nconst mime = item.binary.data.mimeType || 'image/jpeg';\n\n// Intrinsics come from the capture package, recorded by WF1. There is deliberately no\n// $env.CAMERA_* fallback: a fabricated K produces a confidently wrong GlobalId, which is worse\n// than no answer, so a request without trustworthy intrinsics is routed to NEEDS_LOCALIZATION\n// by the gate immediately after this node.\nconst K = item.json.camera_intrinsics || null;\nconst trusted = Boolean(K && K.trusted === true);\n\n// Conventional CV notation on the wire (cx, cy); the MultiSet form and /elements/resolve-ray\n// both call the principal point (px, py). This node is where the two names meet.\nconst out = {\n  ...item.json,\n  image_base64: buffer.toString('base64'),\n  mime_type: mime,\n  intrinsics_source: K ? K.source : null,\n  intrinsics_trusted: trusted,\n  fx: trusted ? Number(K.fx) : null,\n  fy: trusted ? Number(K.fy) : null,\n  px: trusted ? Number(K.cx) : null,\n  py: trusted ? Number(K.cy) : null,\n  width: trusted ? Number(K.width) : null,\n  height: trusted ? Number(K.height) : null,\n  intrinsics_failure_reason: trusted\n    ? null\n    : (K ? 'Intrinsics reported as untrusted by the capturing device'\n         : 'Request has no camera intrinsics (legacy Drive upload or pre-app capture)')\n};\n\nreturn [{ json: out, binary: item.binary }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        -500
+      ],
+      "id": "7856354a-2686-4460-a7b5-abab8c49304c",
+      "name": "Prepare Image and Intrinsics"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/responses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {model:($env.OPENAI_MODEL || 'gpt-4.1-mini'), input:[{role:'user',content:[{type:'input_text',text:'Inspect this building-maintenance image. Extract observable evidence only. Identify the photographed maintenance target and return its bounding box in absolute image pixels for an image that is ' + $json.width + ' pixels wide and ' + $json.height + ' pixels tall. Do not estimate severity, priority, cost or technician skill yet. If uncertain, explain why in manual_review_reason.'},{type:'input_image',image_url:'data:'+$json.mime_type+';base64,'+$json.image_base64}]}], text:{format:{type:'json_schema',name:'cbm_visual_evidence',strict:true,schema:{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"object_type\":{\"type\":\"string\"},\"damage_description\":{\"type\":\"string\"},\"damage_cues\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"safety_signals\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"target_bbox\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x_min\":{\"type\":\"number\"},\"y_min\":{\"type\":\"number\"},\"x_max\":{\"type\":\"number\"},\"y_max\":{\"type\":\"number\"}},\"required\":[\"x_min\",\"y_min\",\"x_max\",\"y_max\"]},\"visual_confidence\":{\"type\":\"number\"},\"manual_review_reason\":{\"type\":\"string\"}},\"required\":[\"object_type\",\"damage_description\",\"damage_cues\",\"safety_signals\",\"target_bbox\",\"visual_confidence\",\"manual_review_reason\"]}}}} }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        100,
+        -500
+      ],
+      "id": "36eb8156-8b3d-4205-bcbc-9ee20bf1e812",
+      "name": "Vision Evidence Extraction"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $json.body ?? $json;\nlet text = response.output_text;\nif (!text && Array.isArray(response.output)) {\n  for (const out of response.output) for (const c of (out.content || [])) {\n    if (c.type === 'output_text' && c.text) text = c.text;\n  }\n}\nlet evidence;\ntry { evidence = typeof text === 'string' ? JSON.parse(text) : text; }\ncatch (e) { evidence = {object_type:'unknown',damage_description:'Vision output could not be parsed',damage_cues:[],safety_signals:[],target_bbox:{x_min:0,y_min:0,x_max:0,y_max:0},visual_confidence:0,manual_review_reason:e.message}; }\n\nconst p = $('Prepare Image and Intrinsics').first().json;\n\n// The worker's tap wins over the model's bounding box.\n//\n// A tap is an observation; a bounding box is a generation, and a hallucinated one silently\n// moves the ray onto a different element. The bbox centre remains only as a fallback for\n// requests captured before the mobile app existed.\nconst tap = p.target_pixel || null;\nconst tapX = tap ? Number(tap.x) : NaN;\nconst tapY = tap ? Number(tap.y) : NaN;\nconst tapUsable = Number.isFinite(tapX) && Number.isFinite(tapY) &&\n                  tapX >= 0 && tapY >= 0 &&\n                  tapX < Number(p.width) && tapY < Number(p.height);\n\nif (tapUsable) {\n  evidence.target_pixel = { x: tapX, y: tapY };\n  evidence.target_pixel_source = 'USER_TAP';\n} else {\n  const b = evidence.target_bbox || {};\n  evidence.target_pixel = {\n    x: (Number(b.x_min) + Number(b.x_max)) / 2,\n    y: (Number(b.y_min) + Number(b.y_max)) / 2\n  };\n  evidence.target_pixel_source = 'VISION_BBOX';\n}\n\nreturn [{json:{...p, visual_evidence:evidence}, binary:$('Prepare Image and Intrinsics').first().binary}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        -500
+      ],
+      "id": "418a9fcf-98ee-424c-bf45-ca9a4fba5fa3",
+      "name": "Parse Visual Evidence"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.multiset.ai/v1/m2m/token",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        -500
+      ],
+      "id": "96e8648a-73f1-41a6-8c65-edaa650eaeab",
+      "name": "MultiSet Token"
+    },
+    {
+      "parameters": {
+        "jsCode": "const tokenResponse = $json;\nconst source = $('Parse Visual Evidence').first();\nconst token = tokenResponse.accessToken || tokenResponse.access_token || tokenResponse.token || tokenResponse.jwt;\nif (!token) throw new Error('MultiSet token response does not contain a JWT');\nreturn [{json:{...source.json,multiset_token:token},binary:source.binary}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        -500
+      ],
+      "id": "f19e8859-e71f-4cdf-88fe-784294e5da90",
+      "name": "Reattach Image and Token"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.multiset.ai/v1/vps/map/query-form",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.multiset_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "image",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "mapCode",
+              "value": "={{ $env.MULTISET_MAP_CODE }}"
+            },
+            {
+              "name": "isRightHanded",
+              "value": "false"
+            },
+            {
+              "name": "width",
+              "value": "={{ String($('Parse Visual Evidence').first().json.width) }}"
+            },
+            {
+              "name": "height",
+              "value": "={{ String($('Parse Visual Evidence').first().json.height) }}"
+            },
+            {
+              "name": "fx",
+              "value": "={{ String($('Parse Visual Evidence').first().json.fx) }}"
+            },
+            {
+              "name": "fy",
+              "value": "={{ String($('Parse Visual Evidence').first().json.fy) }}"
+            },
+            {
+              "name": "px",
+              "value": "={{ String($('Parse Visual Evidence').first().json.px) }}"
+            },
+            {
+              "name": "py",
+              "value": "={{ String($('Parse Visual Evidence').first().json.py) }}"
+            },
+            {
+              "name": "queryMode",
+              "value": "vps-2"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -500
+      ],
+      "id": "3afba906-8908-4f42-a977-2deac37ba900",
+      "name": "MultiSet Localize"
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('Parse Visual Evidence').first().json;\nconst r = $json.body ?? $json;\nconst position = r.position || r.estimatedPose?.position || null;\nconst rotation = r.rotation || r.estimatedPose?.rotation || null;\nreturn [{json:{...source, localization:{poseFound:Boolean(r.poseFound),position,rotation,confidence:Number(r.confidence||0),raw:r}, localization_ok:Boolean(r.poseFound && position && rotation && Number(r.confidence||0) >= Number($env.MULTISET_CONFIDENCE_THRESHOLD || 0.30))}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        -500
+      ],
+      "id": "5a710826-3a13-4407-9b50-cd7557b93b9b",
+      "name": "Normalize Localization"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "ae2f6c69-32eb-4109-97e4-4d3736c78d82",
+              "leftValue": "={{ ($json.localization_ok && $json.intrinsics_trusted !== false) || Boolean($json.manual_ifc_global_id) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        -500
+      ],
+      "id": "983442ac-ffa6-4401-a1b9-6c9f71321f9c",
+      "name": "Localization Trusted?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE maintenance_requests\nSET status='NEEDS_LOCALIZATION', failure_reason=$2, updated_at=now()\nWHERE id=$1::uuid;\nINSERT INTO batch_items(batch_id,request_id,visual_evidence,localization,confidence)\nVALUES ($3::uuid,$1::uuid,$4::jsonb,$5::jsonb,$6)\nON CONFLICT (batch_id,request_id) DO UPDATE SET visual_evidence=EXCLUDED.visual_evidence,localization=EXCLUDED.localization,confidence=EXCLUDED.confidence;\nSELECT $1::uuid AS request_id, 'NEEDS_LOCALIZATION' AS outcome;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.request_id,'VPS pose or confidence is insufficient',$json.batch_id,JSON.stringify($json.visual_evidence),JSON.stringify($json.localization),$json.localization.confidence] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1540,
+        -300
+      ],
+      "id": "52f4c509-37a5-41ba-848e-dfbe81d020e0",
+      "name": "Mark Needs Localization"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.manual_ifc_global_id ? (($env.IFC_SERVICE_URL || 'http://ifc-service:8000') + '/elements/' + encodeURIComponent($json.manual_ifc_global_id)) : (($env.IFC_SERVICE_URL || 'http://ifc-service:8000') + '/elements/resolve-ray') }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.manual_ifc_global_id ? {manual_global_id:$json.manual_ifc_global_id} : {camera_position:$json.localization.position,camera_rotation:$json.localization.rotation,target_pixel:$json.visual_evidence.target_pixel,intrinsics:{fx:$json.fx,fy:$json.fy,px:$json.px,py:$json.py,width:$json.width,height:$json.height},class_hint:({'door':'IfcDoor','window':'IfcWindow','sink':'IfcSanitaryTerminal','toilet':'IfcSanitaryTerminal','light':'IfcLightFixture','wall':'IfcWall'}[String($json.visual_evidence.object_type).toLowerCase()] || null),max_distance:Number($env.IFC_RAY_MAX_DISTANCE || 8)} }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        -620
+      ],
+      "id": "afad7b66-ddb3-4b1a-ab65-49db1be43479",
+      "name": "Resolve Exact IFC Occurrence"
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $('Normalize Localization').first().json;\nconst body = $json.body ?? {};\nconst manual = Boolean(s.manual_ifc_global_id);\nconst found = manual ? ($json.statusCode === 200) : Boolean(body.found);\nconst asset = manual ? {global_id:body.global_id,ifc_class:body.ifc_class,name:body.name,storey:body.storey,space:body.space} : body;\nreturn [{json:{...s,ifc_found:found,asset}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        -620
+      ],
+      "id": "65aaf8c4-e1e9-4f2b-ac30-8853fdec7d7b",
+      "name": "Normalize IFC Resolution"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "927aad04-222b-444a-929f-61f475c72f4c",
+              "leftValue": "={{ $json.ifc_found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2020,
+        -620
+      ],
+      "id": "1176a641-94a1-4a2b-bf86-45b4aed5b6ad",
+      "name": "IFC Occurrence Found?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH existing AS (\n SELECT id FROM tickets\n  WHERE building_id=$3 AND ifc_global_id=$4\n    AND status NOT IN ('CLOSED','CANCELLED')\n  ORDER BY created_at LIMIT 1\n), item_upsert AS (\n INSERT INTO batch_items(batch_id,request_id,visual_evidence,localization,ifc_global_id,ifc_class,ifc_name,ifc_storey,ifc_space,duplicate_of_ticket_id,confidence)\n VALUES ($1::uuid,$2::uuid,$5::jsonb,$6::jsonb,$4,$7,$8,$9,$10,(SELECT id FROM existing),$11)\n ON CONFLICT (batch_id,request_id) DO UPDATE SET\n   visual_evidence=EXCLUDED.visual_evidence, localization=EXCLUDED.localization,\n   ifc_global_id=EXCLUDED.ifc_global_id,ifc_class=EXCLUDED.ifc_class,ifc_name=EXCLUDED.ifc_name,\n   ifc_storey=EXCLUDED.ifc_storey,ifc_space=EXCLUDED.ifc_space,\n   duplicate_of_ticket_id=EXCLUDED.duplicate_of_ticket_id,confidence=EXCLUDED.confidence\n RETURNING id\n), duplicate_update AS (\n UPDATE tickets SET duplicate_count=duplicate_count+1, updated_at=now()\n  WHERE id=(SELECT id FROM existing)\n RETURNING id\n), evidence_insert AS (\n INSERT INTO ticket_evidence(ticket_id,request_id,evidence_type,source_file_id,uri)\n SELECT id,$2::uuid,'DUPLICATE',$12,$13 FROM existing\n ON CONFLICT DO NOTHING\n), request_update AS (\n UPDATE maintenance_requests SET\n   status=CASE WHEN EXISTS(SELECT 1 FROM existing) THEN 'ATTACHED_DUPLICATE'::request_status ELSE 'CLAIMED'::request_status END,\n   existing_ticket_id=(SELECT id FROM existing), updated_at=now()\n WHERE id=$2::uuid RETURNING id\n)\nSELECT CASE WHEN EXISTS(SELECT 1 FROM existing) THEN 'DUPLICATE' ELSE 'GROUNDED' END AS outcome,\n       (SELECT id FROM existing) AS existing_ticket_id;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.batch_id,$json.request_id,$json.building_id,$json.asset.global_id,JSON.stringify($json.visual_evidence),JSON.stringify($json.localization),$json.asset.ifc_class,$json.asset.name,$json.asset.storey,$json.asset.space,$json.localization.confidence,$json.source_file_id,$json.source_web_url] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2260,
+        -760
+      ],
+      "id": "518c6a3e-211d-4bf0-8a1e-651f27d08bb4",
+      "name": "Store Grounded or Duplicate Item"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE maintenance_requests\nSET status='NEEDS_LOCALIZATION', failure_reason=$2, updated_at=now()\nWHERE id=$1::uuid;\nINSERT INTO batch_items(batch_id,request_id,visual_evidence,localization,confidence)\nVALUES ($3::uuid,$1::uuid,$4::jsonb,$5::jsonb,$6)\nON CONFLICT (batch_id,request_id) DO UPDATE SET visual_evidence=EXCLUDED.visual_evidence,localization=EXCLUDED.localization,confidence=EXCLUDED.confidence;\nSELECT $1::uuid AS request_id, 'NEEDS_LOCALIZATION' AS outcome;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.request_id,'No trustworthy IFC ray intersection',$json.batch_id,JSON.stringify($json.visual_evidence),JSON.stringify($json.localization),$json.localization.confidence] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2260,
+        -460
+      ],
+      "id": "4a8781b5-2400-476c-8709-d6ceeee5d6c4",
+      "name": "Mark IFC Unresolved"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ranked AS (\n SELECT bi.request_id, r.source_file_name, r.source_file_id, r.source_web_url, r.reporter_email, r.created_at,\n        bi.visual_evidence, bi.localization, bi.ifc_global_id, bi.ifc_class, bi.ifc_name, bi.ifc_storey, bi.ifc_space,\n        row_number() OVER (PARTITION BY r.building_id,bi.ifc_global_id ORDER BY r.created_at,bi.request_id) AS occurrence_rank,\n        count(*) OVER (PARTITION BY r.building_id,bi.ifc_global_id)-1 AS community_reports\n FROM batch_items bi JOIN maintenance_requests r ON r.id=bi.request_id\n WHERE bi.batch_id=$1::uuid AND bi.ifc_global_id IS NOT NULL AND bi.duplicate_of_ticket_id IS NULL\n), items AS (\n SELECT * FROM ranked WHERE occurrence_rank=1\n), exceptions AS (\n SELECT r.id AS request_id,r.source_file_name,r.source_file_id,r.source_web_url,r.status::text,r.failure_reason,\n        bi.visual_evidence,bi.ifc_global_id,bi.ifc_name,bi.duplicate_of_ticket_id\n FROM maintenance_requests r LEFT JOIN batch_items bi ON bi.batch_id=$1::uuid AND bi.request_id=r.id\n WHERE r.batch_id=$1::uuid AND r.status IN ('NEEDS_LOCALIZATION','ATTACHED_DUPLICATE')\n), rules AS (\n SELECT jsonb_agg(to_jsonb(c) ORDER BY required_skill,severity) AS data FROM cost_rules c\n)\nSELECT $1::uuid AS batch_id,\n       COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY created_at) FROM items i),'[]'::jsonb) AS items,\n       COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY source_file_name) FROM exceptions e),'[]'::jsonb) AS exceptions,\n       COALESCE((SELECT data FROM rules),'[]'::jsonb) AS cost_rules,\n       (SELECT count(*) FROM items) AS grounded_count,\n       (SELECT count(*) FROM exceptions WHERE status='NEEDS_LOCALIZATION') AS unresolved_count,\n       (SELECT count(*) FROM exceptions WHERE status='ATTACHED_DUPLICATE') AS existing_ticket_duplicate_count,\n       COALESCE((SELECT sum(community_reports) FROM items),0) AS same_batch_duplicate_count;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$('Claim Requests and Create Batch').first().json.batch_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -360,
+        120
+      ],
+      "id": "e3015a8d-ff56-420a-bd01-16eda9688831",
+      "name": "Load Batch Payload"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "546cf3ed-bbe9-4b59-b807-e85cc57f314e",
+              "leftValue": "={{ Number($json.grounded_count) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -120,
+        120
+      ],
+      "id": "8c0b5541-8baf-4482-9ea9-db35422fa790",
+      "name": "Grounded Items?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $json;\nreturn [{json:{...p, agent_input: JSON.stringify({\n  task:'Classify and rank this end-of-day maintenance batch.',\n  rules:{\n    severity:'integer 1-5 based on observed damage and safety signals',\n    operational_impact:'integer 1-5 for effect on safe/normal room use',\n    required_skill:'one of carpentry, plumbing, electrical, hvac, general',\n    complexity_factor:'number 0.80-1.50',\n    priority_formula:'severity*10 + (safety_risk?20:0) + operational_impact*3 + min(community_reports,5)*2 + min(age_days,5) - (1-confidence)*10; clamp 0..100',\n    cost:'use matching cost_rules base_min/base_max and multiply by complexity_factor; if no exact skill use general',\n    authority:'advisory only; do not approve, dispatch or close tickets'\n  },\n  items:p.items,\n  non_dispatchable_items:p.exceptions,\n  cost_rules:p.cost_rules\n})}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        120,
+        20
+      ],
+      "id": "16fa4ad9-bc40-48d4-aacc-48e1f037fc0b",
+      "name": "Prepare Agent Input"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.agent_input }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are the CBM end-of-day maintenance triage agent. Process the entire batch, not isolated requests. For every dispatchable item, classify severity, operational impact, safety risk, required skill and complexity. Calculate a recommended priority score and cost range using the supplied formula and cost rules; use the Calculator tool for arithmetic. Rank all dispatchable items from most urgent to least urgent. Review non_dispatchable_items too, summarize their risk and why they require localization or are already attached to an active ticket, but do not rank them as new tickets. Return concise decision rationales: cite observable damage, safety/operational impact, community-report count, confidence and cost implications. Do not reveal hidden chain-of-thought; provide only auditable decision factors. Never approve, dispatch, assign a technician, modify the IFC or close a ticket. Preserve every request_id exactly.",
+          "maxIterations": 8,
+          "returnIntermediateSteps": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        380,
+        20
+      ],
+      "id": "e21e4e37-9dca-4f56-aef6-49e1aef8a605",
+      "name": "End-of-Day Maintenance AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        300,
+        250
+      ],
+      "id": "ba166f65-6371-46ec-8b45-c70d49c314ad",
+      "name": "OpenAI Chat Model"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        500,
+        250
+      ],
+      "id": "1701515e-5956-4cc8-800d-d19ebf5aa8f6",
+      "name": "Calculator Tool"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"batch_summary\": \"Five requests assessed; one safety-critical item requires immediate FM attention.\",\n  \"items\": [\n    {\n      \"request_id\": \"00000000-0000-0000-0000-000000000000\",\n      \"severity\": 4,\n      \"operational_impact\": 4,\n      \"safety_risk\": true,\n      \"required_skill\": \"carpentry\",\n      \"complexity_factor\": 1.1,\n      \"recommended_priority_score\": 78.0,\n      \"estimated_cost_min\": 385.0,\n      \"estimated_cost_max\": 880.0,\n      \"recommended_rank\": 1,\n      \"ranking_rationale\": \"Damaged door hardware presents a safety and access risk; high impact and credible visual evidence.\"\n    }\n  ],\n  \"portfolio_risks\": [\n    \"Access obstruction\"\n  ],\n  \"fm_notes\": \"Approve the batch before dispatch. Verify any low-confidence evidence.\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        700,
+        250
+      ],
+      "id": "76be4ed0-d4da-487c-8e1f-a4ed4e178f74",
+      "name": "Agent Structured Output"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Load Batch Payload').first().json;\nconst raw = $json.output ?? $json;\nconst report = typeof raw === 'string' ? JSON.parse(raw) : raw;\nconst sourceItems = Array.isArray(base.items) ? base.items : JSON.parse(base.items || '[]');\nconst rules = Array.isArray(base.cost_rules) ? base.cost_rules : JSON.parse(base.cost_rules || '[]');\nconst byId = new Map(sourceItems.map(i => [String(i.request_id), i]));\nconst ruleMap = new Map(rules.map(r => [`${r.required_skill}:${r.severity}`, r]));\nconst now = Date.now();\nconst validated = [];\nfor (const a of (report.items || [])) {\n  const src = byId.get(String(a.request_id));\n  if (!src) continue;\n  const severity = Math.max(1, Math.min(5, Math.round(Number(a.severity || 1))));\n  const impact = Math.max(1, Math.min(5, Math.round(Number(a.operational_impact || 1))));\n  const safety = Boolean(a.safety_risk);\n  const skill = ['carpentry','plumbing','electrical','hvac','general'].includes(String(a.required_skill)) ? String(a.required_skill) : 'general';\n  const complexity = Math.max(0.8, Math.min(1.5, Number(a.complexity_factor || 1)));\n  const confidence = Number(src.visual_evidence?.visual_confidence ?? src.confidence ?? 0.5);\n  const reports = Number(src.community_reports || 0);\n  const ageDays = Math.max(0, (now - new Date(src.created_at).getTime()) / 86400000);\n  const score = Math.max(0, Math.min(100, severity*10 + (safety?20:0) + impact*3 + Math.min(reports,5)*2 + Math.min(ageDays,5) - (1-confidence)*10));\n  const rule = ruleMap.get(`${skill}:${severity}`) || ruleMap.get(`general:${severity}`) || {base_min:0,base_max:0};\n  const costMin = Math.round(Number(rule.base_min)*complexity*100)/100;\n  const costMax = Math.round(Number(rule.base_max)*complexity*100)/100;\n  validated.push({\n    request_id:String(a.request_id), severity, operational_impact:impact, safety_risk:safety,\n    required_skill:skill, complexity_factor:complexity, estimated_cost_min:costMin,\n    estimated_cost_max:costMax, priority_score:Math.round(score*100)/100,\n    ranking_rationale:String(a.ranking_rationale || 'Ranked from validated severity, safety, operational impact, evidence confidence and cost.'),\n    damage_description:String(src.visual_evidence?.damage_description || 'Maintenance damage'),\n    ifc_global_id:src.ifc_global_id, ifc_class:src.ifc_class, ifc_name:src.ifc_name,\n    ifc_storey:src.ifc_storey, ifc_space:src.ifc_space,\n    visual_evidence:src.visual_evidence, localization:src.localization\n  });\n}\n// Safe fallback: missing agent items are classified conservatively and remain visible.\nfor (const src of sourceItems) if (!validated.some(v => v.request_id === String(src.request_id))) {\n  const confidence = Number(src.visual_evidence?.visual_confidence ?? src.confidence ?? 0.3);\n  validated.push({request_id:String(src.request_id),severity:3,operational_impact:3,safety_risk:false,required_skill:'general',complexity_factor:1,\n    estimated_cost_min:160,estimated_cost_max:350,priority_score:Math.max(0,39-(1-confidence)*10),\n    ranking_rationale:'Conservative fallback because the Agent output did not contain this request.',\n    damage_description:String(src.visual_evidence?.damage_description || 'Maintenance damage'),ifc_global_id:src.ifc_global_id,ifc_class:src.ifc_class,ifc_name:src.ifc_name,ifc_storey:src.ifc_storey,ifc_space:src.ifc_space,visual_evidence:src.visual_evidence,localization:src.localization});\n}\nvalidated.sort((a,b)=>b.priority_score-a.priority_score || b.severity-a.severity || b.estimated_cost_max-a.estimated_cost_max);\nvalidated.forEach((v,i)=>{v.final_rank=i+1;v.priority_label=v.priority_score>=75?'CRITICAL':v.priority_score>=55?'HIGH':v.priority_score>=35?'MEDIUM':'LOW';});\nconst totalMin = validated.reduce((s,v)=>s+v.estimated_cost_min,0);\nconst totalMax = validated.reduce((s,v)=>s+v.estimated_cost_max,0);\nconst exceptions = Array.isArray(base.exceptions) ? base.exceptions : JSON.parse(base.exceptions || '[]');\nconst rows = validated.map(v=>`<tr><td>${v.final_rank}</td><td>${v.ifc_name||v.ifc_global_id}</td><td>${v.damage_description}</td><td>${v.severity}/5</td><td>${v.priority_label} (${v.priority_score})</td><td>€${v.estimated_cost_min.toFixed(2)}–€${v.estimated_cost_max.toFixed(2)}</td><td>${v.ranking_rationale}</td></tr>`).join('');\nconst exceptionRows = exceptions.map(e=>`<tr><td>${e.source_file_name||e.request_id}</td><td>${e.status}</td><td>${e.ifc_name||e.ifc_global_id||'Not grounded'}</td><td>${e.failure_reason||'Attached to active ticket'}</td></tr>`).join('');\nconst exceptionHtml = exceptionRows ? `<h3>Non-dispatchable requests</h3><table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><tr><th>Evidence</th><th>Status</th><th>Asset</th><th>Reason/action</th></tr>${exceptionRows}</table>` : '';\nconst duplicateNote = Number(base.same_batch_duplicate_count||0)>0 ? `<p><b>Same-asset reports consolidated inside this batch:</b> ${base.same_batch_duplicate_count}. They will become supporting evidence on the primary ticket.</p>` : '';\nconst html = `<h2>CBM end-of-day maintenance report</h2><p>${report.batch_summary||'Batch triage completed.'}</p><p><b>Estimated portfolio cost:</b> €${totalMin.toFixed(2)}–€${totalMax.toFixed(2)}</p>${duplicateNote}<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><tr><th>Rank</th><th>Asset</th><th>Damage</th><th>Severity</th><th>Priority</th><th>Cost range</th><th>Decision rationale</th></tr>${rows}</table>${exceptionHtml}<p><b>Control:</b> No dispatch occurs until the FM approves this report.</p>`;\nreturn [{json:{batch_id:base.batch_id,validated_items:validated,agent_report:{...report,validated_total_cost_min:totalMin,validated_total_cost_max:totalMax,non_dispatchable_items:exceptions},report_html:html}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        20
+      ],
+      "id": "af03f970-4de2-42d0-81b8-7bb30402c533",
+      "name": "Validate Agent Output and Build Report"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH data AS (\n SELECT * FROM jsonb_to_recordset($2::jsonb) AS x(\n  request_id uuid, severity int, operational_impact int, safety_risk boolean,\n  required_skill text, complexity_factor numeric, estimated_cost_min numeric,\n  estimated_cost_max numeric, priority_score numeric, final_rank int,\n  priority_label text, ranking_rationale text, damage_description text,\n  ifc_global_id text, ifc_class text, ifc_name text, ifc_storey text, ifc_space text,\n  visual_evidence jsonb, localization jsonb\n )\n), update_items AS (\n UPDATE batch_items bi SET\n  agent_classification=to_jsonb(d),severity=d.severity,operational_impact=d.operational_impact,\n  required_skill=d.required_skill,safety_risk=d.safety_risk,complexity_factor=d.complexity_factor,\n  estimated_cost_min=d.estimated_cost_min,estimated_cost_max=d.estimated_cost_max,\n  priority_score=d.priority_score,final_rank=d.final_rank,ranking_rationale=d.ranking_rationale\n FROM data d WHERE bi.batch_id=$1::uuid AND bi.request_id=d.request_id RETURNING bi.request_id\n), inserted AS (\n INSERT INTO tickets(request_id,batch_id,building_id,status,batch_rank,priority_score,priority_label,severity,\n operational_impact,safety_risk,required_skill,damage_description,estimated_cost_min,estimated_cost_max,\n ranking_rationale,ifc_global_id,ifc_class,ifc_name,ifc_storey,ifc_space,before_file_id,before_evidence_uri,sla_deadline)\n SELECT d.request_id,$1::uuid,r.building_id,'PENDING_FM_APPROVAL',d.final_rank,d.priority_score,d.priority_label,d.severity,\n d.operational_impact,d.safety_risk,d.required_skill,d.damage_description,d.estimated_cost_min,d.estimated_cost_max,\n d.ranking_rationale,d.ifc_global_id,d.ifc_class,d.ifc_name,d.ifc_storey,d.ifc_space,r.source_file_id,r.source_web_url,\n CASE WHEN d.severity=5 THEN now()+interval '4 hours' WHEN d.severity=4 THEN now()+interval '1 day'\n      WHEN d.severity=3 THEN now()+interval '3 days' ELSE now()+interval '7 days' END\n FROM data d JOIN maintenance_requests r ON r.id=d.request_id\n ON CONFLICT DO NOTHING\n RETURNING id,request_id\n), evidence_insert AS (\n INSERT INTO ticket_evidence(ticket_id,request_id,evidence_type,source_file_id,uri)\n SELECT i.id,i.request_id,'BEFORE',r.source_file_id,r.source_web_url\n FROM inserted i JOIN maintenance_requests r ON r.id=i.request_id\n ON CONFLICT DO NOTHING\n), same_batch_duplicate_items AS (\n UPDATE batch_items bi SET duplicate_of_ticket_id=i.id\n FROM inserted i JOIN data d ON d.request_id=i.request_id\n WHERE bi.batch_id=$1::uuid AND bi.ifc_global_id=d.ifc_global_id\n   AND bi.request_id<>d.request_id AND bi.duplicate_of_ticket_id IS NULL\n RETURNING bi.request_id,bi.duplicate_of_ticket_id\n), same_batch_duplicate_evidence AS (\n INSERT INTO ticket_evidence(ticket_id,request_id,evidence_type,source_file_id,uri)\n SELECT s.duplicate_of_ticket_id,r.id,'DUPLICATE',r.source_file_id,r.source_web_url\n FROM same_batch_duplicate_items s JOIN maintenance_requests r ON r.id=s.request_id\n ON CONFLICT DO NOTHING\n), same_batch_request_update AS (\n UPDATE maintenance_requests r SET status='ATTACHED_DUPLICATE',existing_ticket_id=s.duplicate_of_ticket_id,updated_at=now()\n FROM same_batch_duplicate_items s WHERE r.id=s.request_id RETURNING r.id\n), same_batch_ticket_update AS (\n UPDATE tickets t SET duplicate_count=t.duplicate_count+x.cnt,updated_at=now()\n FROM (SELECT duplicate_of_ticket_id,count(*)::int AS cnt FROM same_batch_duplicate_items GROUP BY duplicate_of_ticket_id) x\n WHERE t.id=x.duplicate_of_ticket_id RETURNING t.id\n), req_update AS (\n UPDATE maintenance_requests r SET status='CONVERTED_TO_TICKET',updated_at=now()\n FROM inserted i WHERE r.id=i.request_id RETURNING r.id\n), batch_update AS (\n UPDATE processing_batches SET status='PENDING_FM_APPROVAL',agent_report=$3::jsonb,report_html=$4,\n   item_count=(SELECT count(*) FROM maintenance_requests WHERE batch_id=$1::uuid),\n   grounded_count=(SELECT count(*) FROM data),\n   unresolved_count=(SELECT count(*) FROM maintenance_requests WHERE batch_id=$1::uuid AND status='NEEDS_LOCALIZATION'),\n   duplicate_count=(SELECT count(*) FROM maintenance_requests WHERE batch_id=$1::uuid AND status='ATTACHED_DUPLICATE'),\n   updated_at=now()\n WHERE id=$1::uuid RETURNING id\n)\nSELECT (SELECT count(*) FROM inserted) AS opened_tickets, (SELECT id FROM batch_update) AS batch_id;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.batch_id,JSON.stringify($json.validated_items),JSON.stringify($json.agent_report),$json.report_html] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        920,
+        20
+      ],
+      "id": "093749c6-737b-4956-95c3-cea4a7c44840",
+      "name": "Open Provisional Tickets"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.FM_EMAIL }}",
+        "subject": "={{ 'CBM batch ' + $('Validate Agent Output and Build Report').first().json.batch_id + ' - approval required' }}",
+        "emailType": "html",
+        "message": "={{ $('Validate Agent Output and Build Report').first().json.report_html + '<p><a href=\"' + $execution.resumeUrl + '?decision=approve&actor=' + encodeURIComponent($env.FM_EMAIL) + '\">APPROVE BATCH</a> &nbsp; <a href=\"' + $execution.resumeUrl + '?decision=reject&actor=' + encodeURIComponent($env.FM_EMAIL) + '\">REJECT BATCH</a></p>' }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1180,
+        20
+      ],
+      "id": "b81edbc3-1624-4e89-870e-13004a63f098",
+      "name": "Email FM Batch Report"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "GET",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1420,
+        20
+      ],
+      "id": "a3d0a349-92c7-4278-9896-c920cba9fb26",
+      "name": "Wait for FM Batch Approval",
+      "webhookId": "69b11817-23d7-48e4-b97d-5ac27dcc6d5a"
+    },
+    {
+      "parameters": {
+        "jsCode": "const q = $json.query || {};\nreturn [{json:{batch_id:$('Validate Agent Output and Build Report').first().json.batch_id,decision:String(q.decision||'').toLowerCase(),actor:q.actor||$env.FM_EMAIL||'fm',reason:q.reason||'Batch rejected by Facility Manager'}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        20
+      ],
+      "id": "94eca05d-44e9-440d-8fb4-a219fbdfd973",
+      "name": "Normalize FM Batch Decision"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "5acbfb1d-d683-4c97-866d-3492452109dd",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1900,
+        20
+      ],
+      "id": "d4f750d2-368f-44be-8b31-a72e34187b2e",
+      "name": "FM Approved Batch?"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT cbm_approve_batch($1::uuid,$2) AS released_tickets;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.batch_id,$json.actor] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2140,
+        -80
+      ],
+      "id": "f525412c-cf66-4ef4-83cf-2f772432eca1",
+      "name": "Approve Batch Atomically"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT cbm_reject_batch($1::uuid,$2,$3) AS cancelled_tickets;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.batch_id,$json.actor,$json.reason] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2140,
+        120
+      ],
+      "id": "3f722bc8-fc4f-4f1b-9d0c-acbd5b6dd27e",
+      "name": "Reject Batch Atomically"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.FM_EMAIL }}",
+        "subject": "CBM batch approved",
+        "message": "={{ 'Approval recorded. ' + $json.released_tickets + ' ticket(s) are now eligible for sequential dispatch.' }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2380,
+        -80
+      ],
+      "id": "f17713ac-0960-4b92-a35c-2ef6cbb37ba2",
+      "name": "Notify FM Approval Recorded"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.FM_EMAIL }}",
+        "subject": "CBM batch rejected",
+        "message": "No ticket from this batch will be dispatched. Correct the source data and reprocess the requests.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2380,
+        120
+      ],
+      "id": "e6460b99-7379-4395-b7f1-b5ff9f0e7f2e",
+      "name": "Notify FM Batch Rejected"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE processing_batches SET status='COMPLETED',updated_at=now(),unresolved_count=(SELECT count(*) FROM maintenance_requests WHERE batch_id=$1::uuid AND status='NEEDS_LOCALIZATION'),duplicate_count=(SELECT count(*) FROM maintenance_requests WHERE batch_id=$1::uuid AND status='ATTACHED_DUPLICATE') WHERE id=$1::uuid RETURNING *;",
+        "options": {
+          "queryBatching": "single",
+          "queryParameters": "={{ [$json.batch_id] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        140,
+        180
+      ],
+      "id": "b4c79d2d-7570-41c6-8278-ac9d1916aca2",
+      "name": "Complete Empty or Unresolved Batch"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.FM_EMAIL }}",
+        "subject": "CBM end-of-day batch - no dispatchable tickets",
+        "message": "={{ 'The batch contained only duplicates or requests needing localization. Unresolved: ' + $json.unresolved_count + '; duplicates: ' + $json.duplicate_count + '.' }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        380,
+        180
+      ],
+      "id": "e6b9cd72-74b6-44a4-a975-b2afc4c82c9e",
+      "name": "Notify FM - No Dispatchable Tickets"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "a7c11f22-0003-4a00-9000-000000000003",
+              "leftValue": "={{ $json.intrinsics_trusted === true || Boolean($json.manual_ifc_global_id) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -30,
+        -360
+      ],
+      "id": "66ae32e7-afad-52cf-b6b7-43dba9db6758",
+      "name": "Intrinsics Trusted?"
+    }
+  ],
+  "connections": {
+    "End-of-Day Schedule": {
+      "main": [
+        [
+          {
+            "node": "Claim Requests and Create Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Requests and Create Batch": {
+      "main": [
+        [
+          {
+            "node": "Requests Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requests Found?": {
+      "main": [
+        [
+          {
+            "node": "Loop Requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Requests - Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Requests": {
+      "main": [
+        [
+          {
+            "node": "Download Request Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load Batch Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Request Image": {
+      "main": [
+        [
+          {
+            "node": "Prepare Image and Intrinsics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Image and Intrinsics": {
+      "main": [
+        [
+          {
+            "node": "Intrinsics Trusted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision Evidence Extraction": {
+      "main": [
+        [
+          {
+            "node": "Parse Visual Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Visual Evidence": {
+      "main": [
+        [
+          {
+            "node": "MultiSet Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MultiSet Token": {
+      "main": [
+        [
+          {
+            "node": "Reattach Image and Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reattach Image and Token": {
+      "main": [
+        [
+          {
+            "node": "MultiSet Localize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MultiSet Localize": {
+      "main": [
+        [
+          {
+            "node": "Normalize Localization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Localization": {
+      "main": [
+        [
+          {
+            "node": "Localization Trusted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Localization Trusted?": {
+      "main": [
+        [
+          {
+            "node": "Resolve Exact IFC Occurrence",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Needs Localization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Needs Localization": {
+      "main": [
+        [
+          {
+            "node": "Loop Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Exact IFC Occurrence": {
+      "main": [
+        [
+          {
+            "node": "Normalize IFC Resolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize IFC Resolution": {
+      "main": [
+        [
+          {
+            "node": "IFC Occurrence Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IFC Occurrence Found?": {
+      "main": [
+        [
+          {
+            "node": "Store Grounded or Duplicate Item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark IFC Unresolved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Grounded or Duplicate Item": {
+      "main": [
+        [
+          {
+            "node": "Loop Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark IFC Unresolved": {
+      "main": [
+        [
+          {
+            "node": "Loop Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Batch Payload": {
+      "main": [
+        [
+          {
+            "node": "Grounded Items?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Grounded Items?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Agent Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Complete Empty or Unresolved Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Agent Input": {
+      "main": [
+        [
+          {
+            "node": "End-of-Day Maintenance AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "End-of-Day Maintenance AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate Agent Output and Build Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "End-of-Day Maintenance AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "End-of-Day Maintenance AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Structured Output": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "End-of-Day Maintenance AI Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Agent Output and Build Report": {
+      "main": [
+        [
+          {
+            "node": "Open Provisional Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Provisional Tickets": {
+      "main": [
+        [
+          {
+            "node": "Email FM Batch Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email FM Batch Report": {
+      "main": [
+        [
+          {
+            "node": "Wait for FM Batch Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for FM Batch Approval": {
+      "main": [
+        [
+          {
+            "node": "Normalize FM Batch Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize FM Batch Decision": {
+      "main": [
+        [
+          {
+            "node": "FM Approved Batch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FM Approved Batch?": {
+      "main": [
+        [
+          {
+            "node": "Approve Batch Atomically",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject Batch Atomically",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve Batch Atomically": {
+      "main": [
+        [
+          {
+            "node": "Notify FM Approval Recorded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject Batch Atomically": {
+      "main": [
+        [
+          {
+            "node": "Notify FM Batch Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Complete Empty or Unresolved Batch": {
+      "main": [
+        [
+          {
+            "node": "Notify FM - No Dispatchable Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intrinsics Trusted?": {
+      "main": [
+        [
+          {
+            "node": "Vision Evidence Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Needs Localization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Rome",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "90f9b62d-a3c5-4667-a54e-54359f78e20e",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
