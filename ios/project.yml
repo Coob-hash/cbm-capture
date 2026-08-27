@@ -38,7 +38,11 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.cbm.capture
-        PRODUCT_NAME: CBM Capture
+        # No PRODUCT_NAME override. Setting it to "CBM Capture" builds
+        # `CBM Capture.app/CBM Capture`, while the test bundle's TEST_HOST is derived from the
+        # target name and looks for `CBMCapture.app/CBMCapture` - so the app builds fine and
+        # every test run fails with "Could not find test host". The home-screen name comes from
+        # CFBundleDisplayName in Info.plist, which is already "CBM Capture".
         INFOPLIST_FILE: CBMCapture/Resources/Info.plist
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 1.0.0
