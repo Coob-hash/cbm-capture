@@ -118,15 +118,20 @@ jobs:
             exit 1
           fi
           echo "Using simulator $UDID"
+          xcrun simctl list devices | grep "$UDID" || true
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
+      # `platform=iOS Simulator` alongside the id is required, not decorative: given a bare
+      # `id=...` xcodebuild searches every platform, matches nothing, and reports the physical
+      # "Any iOS Device" placeholder as the near miss - an error that reads as a missing SDK
+      # rather than an under-specified destination.
       - name: Test
         run: |
           set -o pipefail
           xcodebuild test \
             -project CBMCapture.xcodeproj \
             -scheme CBMCapture \
-            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
