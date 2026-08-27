@@ -82,16 +82,43 @@ jobs:
       # which does NOT set pipefail, so the exit status of `xcodebuild | xcbeautify` is
       # xcbeautify's - and xcbeautify exits 0 even when the build it just formatted failed.
       # Without this line the job reports a green tick over `** BUILD FAILED **`.
+      #
+      # `generic/platform=iOS Simulator` needs no concrete device, which is the point: naming a
+      # specific simulator ("iPhone 16") makes the job depend on the runner image happening to
+      # have that device pre-created, and it does not always. Compilation is what this step is
+      # for, and it does not need a bootable device.
       - name: Build
         run: |
           set -o pipefail
           xcodebuild build \
             -project CBMCapture.xcodeproj \
             -scheme CBMCapture \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
+
+      # Tests do need a real device, so resolve one at run time rather than guessing its name.
+      - name: Resolve a simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          for runtime, devices in runtimes.items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  if device.get("isAvailable"):
+                      print(device["udid"])
+                      raise SystemExit
+          ')
+          if [ -z "$UDID" ]; then
+            echo "No available iOS simulator on this runner. Devices seen:"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
       - name: Test
         run: |
@@ -99,8 +126,7 @@ jobs:
           xcodebuild test \
             -project CBMCapture.xcodeproj \
             -scheme CBMCapture \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
