@@ -65,8 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+      # Deliberately NOT pinning an Xcode version. Pinning Xcode_16 selected a toolchain whose
+      # bundled iOS 18.0 simulator runtime is not installed on the image, while the simulators
+      # that do exist are newer - so every destination was ineligible and the error read as a
+      # missing SDK. The image's default Xcode always has matching runtimes, and the project
+      # only requires Xcode 16 or later.
+      - name: Toolchain and simulator inventory
+        run: |
+          xcodebuild -version
+          echo "--- installed simulator runtimes ---"
+          xcrun simctl list runtimes
 
       - name: Install XcodeGen
         run: brew install xcodegen
