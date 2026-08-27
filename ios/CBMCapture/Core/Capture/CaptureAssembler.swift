@@ -132,9 +132,14 @@ extension ClientInfo {
         let bundle = Bundle.main
         let short = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let build = bundle.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        // `ProcessInfo` rather than `UIDevice.current.systemVersion`: the latter is
+        // main-actor isolated under Swift 6, and this is read from whichever context is
+        // assembling a package. Isolating it to the main actor to satisfy the compiler would
+        // put a UI dependency in the middle of the capture path for no benefit.
+        let os = ProcessInfo.processInfo.operatingSystemVersion
         return ClientInfo(
             appVersion: "\(short) (\(build))",
-            osVersion: UIDevice.current.systemVersion,
+            osVersion: "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
             deviceModel: Self.hardwareIdentifier
         )
     }
