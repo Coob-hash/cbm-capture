@@ -1,0 +1,7 @@
+# Minimum versions rather than exact pins: this is a development stand-in that has to install
+# cleanly on whatever Python is already on the machine. Exact pins looked tidy and immediately
+# broke on Python 3.14, where the pinned Pillow had no wheel and fell back to a source build.
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20
+pillow>=11.3.0

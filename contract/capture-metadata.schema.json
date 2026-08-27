@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cbm.local/schemas/capture-metadata-1.0.0.json",
+  "title": "CBM Capture Package Metadata",
+  "description": "The `metadata` part of a multipart POST /cbm/capture request. Accompanies exactly one image part. Every pixel-space quantity in this document (camera.cx/cy/fx/fy, target.pixel) is expressed in the coordinate system of the image part that travels with it - never the sensor native frame, never the original pre-resize frame.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capture_id", "building_id", "captured_at", "client", "image", "camera", "target"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "capture_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Client-generated UUIDv4. Stable across upload retries; the server idempotency key. Maps to maintenance_requests.source_file_id."
+    },
+    "building_id": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["ROOM-POC"],
+      "description": "Selects the MultiSet map and the IFC model. Must match CBM_BUILDING_ID server-side."
+    },
+    "reporter_email": {
+      "type": ["string", "null"],
+      "format": "email",
+      "description": "Identifies the reporting worker. Maps to maintenance_requests.reporter_email."
+    },
+    "description": {
+      "type": ["string", "null"],
+      "maxLength": 2000,
+      "description": "Free-text damage description typed by the worker. Supplements, never replaces, the vision model analysis."
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339, UTC, from the device clock at shutter time. Not the upload time - an outbox item may upload days later."
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "app_version", "os_version", "device_model"],
+      "properties": {
+        "platform": { "enum": ["IOS", "ANDROID"] },
+        "app_version": { "type": "string", "examples": ["1.0.0 (12)"] },
+        "os_version": { "type": "string", "examples": ["18.5"] },
+        "device_model": {
+          "type": "string",
+          "examples": ["iPhone15,2", "Pixel 8 Pro"],
+          "description": "Raw model identifier. Required for the per-device accuracy ablation in section 8 of the calibration note."
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "mime_type", "sha256", "byte_length", "orientation_applied"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "description": "Width of the transmitted image part, measured after all transforms." },
+        "height": { "type": "integer", "minimum": 1 },
+        "mime_type": { "enum": ["image/jpeg"] },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Hex SHA-256 of the transmitted image bytes. The server rejects the package if it disagrees." },
+        "byte_length": { "type": "integer", "minimum": 1 },
+        "orientation_applied": {
+          "type": "integer",
+          "enum": [0, 1, 2, 3],
+          "description": "Quarter-turns clockwise already baked into the pixels, relative to the sensor native frame. The EXIF orientation tag is always 1 (normal): rotation is applied to the pixel data, not deferred to a tag, so that no downstream consumer can disagree about which frame K belongs to."
+        },
+        "source_width": { "type": "integer", "minimum": 1, "description": "Sensor-native width before rotate/resize. Provenance only." },
+        "source_height": { "type": "integer", "minimum": 1 },
+        "scale": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Uniform downscale factor applied after rotation. Provenance only - K is already scaled." }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "trusted", "fx", "fy", "cx", "cy", "width", "height"],
+      "description": "Pinhole intrinsics in the transmitted image pixel frame. Conventional CV notation (fx, fy, cx, cy); WF2 renames cx/cy to px/py when calling MultiSet and /elements/resolve-ray.",
+      "properties": {
+        "source": {
+          "enum": ["ARKIT", "ARCORE", "ANDROID_CAMERA2", "EXIF", "MANUAL_OVERRIDE"],
+          "description": "Provenance of K, in descending order of trust. Persisted so every resolved GlobalId can be audited by how its camera was calibrated."
+        },
+        "trusted": {
+          "type": "boolean",
+          "description": "False when K came from a fallback that failed the plausibility gate. A false value must route the request to NEEDS_LOCALIZATION rather than being silently unprojected."
+        },
+        "fx": { "type": "number", "exclusiveMinimum": 0 },
+        "fy": { "type": "number", "exclusiveMinimum": 0 },
+        "cx": { "type": "number", "minimum": 0 },
+        "cy": { "type": "number", "minimum": 0 },
+        "skew": { "type": "number", "default": 0, "description": "Camera2 reports a skew term; ARKit and ARCore are always 0. The IFC ray math ignores it - carried for completeness only." },
+        "width": { "type": "integer", "minimum": 1, "description": "Must equal image.width. The server enforces this." },
+        "height": { "type": "integer", "minimum": 1, "description": "Must equal image.height." },
+        "lens": {
+          "type": ["string", "null"],
+          "examples": ["wide", "ultrawide", "telephoto"],
+          "description": "Which physical lens produced the frame, when the platform reports it."
+        },
+        "distortion": {
+          "type": ["array", "null"],
+          "items": { "type": "number" },
+          "description": "Radial/tangential coefficients when available. Not applied in v1 - the pipeline assumes a pinhole model and gates on frame position instead."
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pixel", "source"],
+      "description": "Where the worker says the defect is. Replaces the vision model hallucinated bounding box as the ray origin pixel.",
+      "properties": {
+        "pixel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": {
+            "x": { "type": "number", "minimum": 0 },
+            "y": { "type": "number", "minimum": 0 }
+          }
+        },
+        "source": { "enum": ["USER_TAP"] },
+        "centrality": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "0 at the frame centre, 1 at the edge, as max(|x/W-0.5|, |y/H-0.5|)/0.5. Section 6.2 of the calibration note rejects captures above ~0.6 because pinhole error grows toward the edge."
+        }
+      }
+    },
+    "pose": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["source", "position", "rotation", "tracking_state"],
+      "description": "ADVISORY ONLY in v1. The AR session own world pose. It is NOT in the MultiSet/IFC frame and must never be fed to /elements/resolve-ray; WF2 keeps deriving the trusted pose from MultiSet VPS. Carried so the two can be cross-checked offline.",
+      "properties": {
+        "source": { "enum": ["ARKIT", "ARCORE"] },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "z"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }
+        },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "z", "w"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" }, "w": { "type": "number" } }
+        },
+        "tracking_state": { "enum": ["NORMAL", "LIMITED", "NOT_AVAILABLE"] },
+        "coordinate_space": { "type": "string", "default": "AR_SESSION_WORLD" }
+      }
+    }
+  }
+}

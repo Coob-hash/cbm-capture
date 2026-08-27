@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0.0",
+  "capture_id": "46ccbf7f-2f0a-4a1e-9d3c-0b6b8f5a1c22",
+  "building_id": "ROOM-POC",
+  "reporter_email": "worker@example.com",
+  "description": "Door handle detached, door will not latch.",
+  "captured_at": "2026-08-27T18:32:14.482Z",
+  "client": {
+    "platform": "IOS",
+    "app_version": "1.0.0 (12)",
+    "os_version": "18.5",
+    "device_model": "iPhone15,2"
+  },
+  "image": {
+    "width": 960,
+    "height": 1280,
+    "mime_type": "image/jpeg",
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "byte_length": 284412,
+    "orientation_applied": 1,
+    "source_width": 1920,
+    "source_height": 1440,
+    "scale": 0.6666666666666666
+  },
+  "camera": {
+    "source": "ARKIT",
+    "trusted": true,
+    "fx": 954.63,
+    "fy": 955.07,
+    "cx": 480.19,
+    "cy": 639.65,
+    "skew": 0.0,
+    "width": 960,
+    "height": 1280,
+    "lens": "wide",
+    "distortion": null
+  },
+  "target": {
+    "pixel": { "x": 512.0, "y": 706.5 },
+    "source": "USER_TAP",
+    "centrality": 0.104
+  },
+  "pose": {
+    "source": "ARKIT",
+    "position": { "x": 0.184, "y": 1.412, "z": -0.933 },
+    "rotation": { "x": 0.0121, "y": 0.7071, "z": -0.0088, "w": 0.7069 },
+    "tracking_state": "NORMAL",
+    "coordinate_space": "AR_SESSION_WORLD"
+  }
+}

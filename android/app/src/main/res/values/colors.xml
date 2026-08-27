@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Instrument teal: the accent used throughout the app's chrome. -->
+    <color name="ic_launcher_background">#0E6B63</color>
+</resources>

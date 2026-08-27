@@ -1,0 +1,131 @@
+# Builds and tests both apps.
+#
+# This file must sit at the ROOT of the git repository to be picked up. If this folder is
+# nested inside a larger repo, move .github/ to the repo root and adjust the `working-directory`
+# values below.
+#
+# The iOS job is the reason this workflow exists. Xcode runs only on macOS, so a Windows or
+# Linux workstation cannot compile the iOS target at all; GitHub's macOS runners can, at no cost
+# for a public repository. Push once and the ARKit, SwiftUI, and SwiftData code is compiled by a
+# real Xcode toolchain and its test suite is executed.
+
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Android — build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --console=plain
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbm-capture-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-report
+          path: android/app/build/reports/tests/testDebugUnitTest
+
+  ios:
+    name: iOS — build and test
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      # Builds against the simulator SDK, which needs no signing certificate. ARKit and
+      # RealityKit compile for the simulator even though the AR session cannot run there —
+      # which is exactly what is being checked here: that the code is correct, not that the
+      # camera works on a machine with no camera.
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project CBMCapture.xcodeproj \
+            -scheme CBMCapture \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+      - name: Test
+        run: |
+          xcodebuild test \
+            -project CBMCapture.xcodeproj \
+            -scheme CBMCapture \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+  contract:
+    name: Contract — schema and example agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install jsonschema pyyaml
+
+      # Cheap, and it catches the failure mode that would be most expensive in the field: an app
+      # and a server that disagree about the shape of a capture package.
+      - name: Validate the example against the schema
+        run: |
+          python - <<'PY'
+          import json, jsonschema
+          schema = json.load(open("contract/capture-metadata.schema.json"))
+          example = json.load(open("contract/example-capture.json"))
+          jsonschema.validate(example, schema)
+          assert example["camera"]["width"] == example["image"]["width"]
+          assert example["camera"]["height"] == example["image"]["height"]
+          t = example["target"]["pixel"]
+          assert 0 <= t["x"] < example["image"]["width"]
+          assert 0 <= t["y"] < example["image"]["height"]
+          print("contract OK: example validates and the frame invariant holds")
+          PY
+
+      - name: Validate the OpenAPI document parses
+        run: python -c "import yaml; yaml.safe_load(open('contract/openapi.yaml')); print('openapi.yaml OK')"

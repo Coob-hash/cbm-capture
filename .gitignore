@@ -1,0 +1,23 @@
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+# Machine-specific SDK path; each checkout regenerates it.
+android/local.properties
+
+# iOS - generated from ios/project.yml by xcodegen
+ios/*.xcodeproj/
+ios/*.xcworkspace/
+ios/build/
+ios/DerivedData/
+
+# Mock server
+mock-server/received/
+mock-server/__pycache__/
+**/__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

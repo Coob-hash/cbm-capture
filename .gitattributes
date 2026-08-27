@@ -1,0 +1,18 @@
+# Normalise to LF in the repository. Without this, Git's autocrlf on Windows commits CRLF into
+# `gradlew` and `env.sh`, and the Linux and macOS CI runners then fail them with
+# "bad interpreter: No such file or directory" - a failure that looks nothing like its cause.
+* text=auto eol=lf
+
+# Scripts that must stay LF wherever they are checked out.
+gradlew        text eol=lf
+*.sh           text eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat          text eol=crlf
+*.ps1          text eol=crlf
+
+# Binary.
+*.jar          binary
+*.png          binary
+*.jpg          binary
+*.apk          binary

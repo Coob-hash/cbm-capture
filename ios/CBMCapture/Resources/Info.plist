@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>CBM Capture</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+
+	<key>NSCameraUsageDescription</key>
+	<string>CBM Capture uses the camera to photograph building damage and to read the camera's own calibration, which is what lets the office locate the fault on the building model.</string>
+
+	<!-- ARKit is not optional for this app: the whole point is ARFrame.camera.intrinsics.
+	     Listing it here keeps the App Store from offering the app on devices that cannot run it. -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+		<string>arkit</string>
+	</array>
+
+	<!-- The capture screen is designed for portrait. The transform layer handles every
+	     orientation correctly, but a single orientation keeps the one-tap interaction
+	     unambiguous for a worker holding the phone one-handed. -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string></string>
+	</dict>
+
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+
+	<!-- Allow cleartext only to a local n8n during development. Remove this block before any
+	     deployment that leaves a lab network: it is the difference between a bearer token on
+	     the wire and a bearer token in a TLS tunnel. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

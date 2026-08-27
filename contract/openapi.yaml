@@ -1,0 +1,172 @@
+openapi: 3.1.0
+info:
+  title: CBM Capture Intake API
+  version: 1.0.0
+  description: |
+    The intake surface consumed by the CBM Capture mobile apps (iOS/ARKit, Android/ARCore).
+
+    Implemented by an n8n Webhook node at the front of WF1, replacing the Google Drive
+    trigger as the system entry point. Drive becomes image storage downstream rather than
+    the intake mechanism, so the image and its calibration arrive as one atomic package
+    instead of two independently uploaded objects that have to be correlated later.
+
+    The single invariant this API exists to protect: the intrinsics and the image describe
+    exactly the same camera frame. `camera.width`/`camera.height` MUST equal
+    `image.width`/`image.height`, and `target.pixel` MUST lie in that same frame. A server
+    that accepts a package violating this is reintroducing the fail-open unprojection the
+    calibration note identifies.
+servers:
+  - url: https://n8n.example.com/webhook
+    description: n8n production webhook base
+  - url: https://n8n.example.com/webhook-test
+    description: n8n test webhook base (only live while the workflow editor is listening)
+  - url: http://localhost:8099
+    description: Local mock server bundled at mock-server/main.py
+
+security:
+  - bearerAuth: []
+
+paths:
+  /cbm/capture:
+    post:
+      operationId: submitCapture
+      summary: Submit one capture package (image plus factory intrinsics)
+      description: |
+        Accepts one photograph together with the camera calibration that produced it.
+
+        Idempotency: `metadata.capture_id` is the key. Re-POSTing a package whose
+        `capture_id` has already been staged MUST return 200 with the original
+        `request_id` rather than creating a second maintenance request. The mobile
+        outbox relies on this - it retries until it gets a definitive answer, and a
+        response lost to a dropped connection is indistinguishable from a request
+        that never arrived.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image, metadata]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: JPEG bytes. EXIF orientation is always 1; rotation is baked into the pixels.
+                metadata:
+                  type: string
+                  description: A JSON document conforming to capture-metadata.schema.json, sent as a text part.
+            encoding:
+              image:
+                contentType: image/jpeg
+              metadata:
+                contentType: application/json
+      responses:
+        "200":
+          description: |
+            Accepted, or already known. `duplicate: true` means this capture_id was
+            staged by an earlier attempt; the client treats it as success and clears
+            the outbox entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureAccepted"
+        "400":
+          description: Malformed package - unparseable metadata, missing part, or sha256 mismatch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureError" }
+        "401":
+          description: Missing or invalid bearer token. The client stops retrying and prompts for re-enrolment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureError" }
+        "413":
+          description: Image exceeds the server limit. Permanent for this package; the client does not retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureError" }
+        "422":
+          description: |
+            Semantically invalid. Chiefly: `camera.trusted` is false, or camera dimensions
+            disagree with image dimensions. The request is still recorded, with status
+            NEEDS_LOCALIZATION for untrusted intrinsics and REJECTED_INPUT for a frame
+            mismatch. Permanent - the client does not retry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaptureError" }
+        "429":
+          description: Rate limited. The client retries with backoff.
+        "500":
+          description: Server-side failure. The client retries with backoff.
+
+  /cbm/capture/health:
+    get:
+      operationId: captureHealth
+      summary: Connectivity and credential probe used by the app Settings screen
+      responses:
+        "200":
+          description: Endpoint reachable and token accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, building_id]
+                properties:
+                  ok: { type: boolean }
+                  building_id:
+                    type: string
+                    description: The building this endpoint is configured for. The app warns when it disagrees with its own setting.
+                  schema_version: { type: string }
+        "401":
+          description: Token rejected.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Shared PoC token, provisioned once per handset on the Settings screen and held in
+        the iOS Keychain / Android EncryptedSharedPreferences. In n8n this is a Header Auth
+        credential on the Webhook node with header name `Authorization` and value
+        `Bearer <token>`.
+
+  schemas:
+    CaptureAccepted:
+      type: object
+      required: [ok, capture_id, status]
+      properties:
+        ok: { type: boolean, const: true }
+        capture_id: { type: string, format: uuid }
+        request_id:
+          type: string
+          format: uuid
+          description: maintenance_requests.id assigned by WF1.
+        status:
+          type: string
+          enum: [RECEIVED, NEEDS_LOCALIZATION, REJECTED_INPUT]
+        duplicate:
+          type: boolean
+          default: false
+          description: True when this capture_id was already staged.
+
+    CaptureError:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: { type: boolean, const: false }
+        error:
+          type: string
+          enum:
+            - MALFORMED_METADATA
+            - MISSING_IMAGE
+            - CHECKSUM_MISMATCH
+            - UNAUTHORIZED
+            - IMAGE_TOO_LARGE
+            - UNTRUSTED_INTRINSICS
+            - FRAME_MISMATCH
+            - UNSUPPORTED_SCHEMA_VERSION
+            - RATE_LIMITED
+            - INTERNAL
+        detail: { type: string }
+        capture_id: { type: string, format: uuid }
