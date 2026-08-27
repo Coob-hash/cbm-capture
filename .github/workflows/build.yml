@@ -198,15 +198,6 @@ jobs:
         working-directory: server/n8n
         run: node test_code_nodes.mjs
 
-      # The whole point of this change is that no fabricated calibration can reach the ray math.
-      - name: No CAMERA_* environment fallback survives
-        run: |
-          if grep -rn 'env\.CAMERA_' server/n8n/*.json; then
-            echo "::error::a \$env.CAMERA_* fallback is back in the workflows"
-            exit 1
-          fi
-          echo "no \$env.CAMERA_* references in the workflows"
-
   contract:
     name: Contract — schema and example agree
     runs-on: ubuntu-latest

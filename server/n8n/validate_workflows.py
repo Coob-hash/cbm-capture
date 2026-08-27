@@ -64,6 +64,26 @@ def validate(path: Path) -> list[str]:
         if referenced_name not in by_name:
             problems.append(f"expression references unknown node $('{referenced_name}')")
 
+    # No fabricated camera intrinsics may reach the ray math. The whole point of the change is
+    # that K comes from the device, so a reintroduced $env.CAMERA_* fallback is a regression.
+    #
+    # This deliberately ignores comment lines: several of them *mention* the fallback in order
+    # to explain why it is gone, and a plain grep cannot tell prose from code.
+    for node in wf["nodes"]:
+        js = node["parameters"].get("jsCode")
+        if isinstance(js, str):
+            for lineno, line in enumerate(js.split("\n"), 1):
+                stripped = line.strip()
+                if stripped.startswith("//") or stripped.startswith("*"):
+                    continue
+                if "$env.CAMERA_" in line:
+                    problems.append(
+                        f"{node['name']!r} line {lineno}: $env.CAMERA_* fallback reintroduced")
+        # Expressions outside Code nodes carry no comments, so any occurrence is real.
+        for key, value in node["parameters"].items():
+            if key != "jsCode" and "$env.CAMERA_" in json.dumps(value):
+                problems.append(f"{node['name']!r} parameter {key!r}: $env.CAMERA_* fallback reintroduced")
+
     # A responseMode:responseNode webhook needs a Respond node downstream or the caller hangs
     # until the workflow times out.
     respond_nodes = [n for n in wf["nodes"] if n["type"].endswith("respondToWebhook")]
