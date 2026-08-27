@@ -134,30 +134,22 @@ That is the whole product. Everything else is a queue and four screens.
 
 ## Status
 
+All three CI jobs are green: <https://github.com/Coob-hash/cbm-capture/actions>
+
 | | |
 |---|---|
-| **Android** | Builds and passes 16/16 unit tests. `app-debug.apk`, 21.79 MB. |
-| **Mock server** | Runs; 19/19 contract assertions pass across every rejection branch. |
+| **Android** | Compiles (221 classes), **16/16 unit tests pass**, `app-debug.apk` 21.79 MB. |
+| **iOS** | Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`, **17/17 tests pass** on the simulator. |
+| **Mock server** | Runs; 19/19 contract assertions across every rejection branch. |
 | **Contract** | Example validates against the schema; frame invariant holds. |
-| **iOS** | **Not compiled** — needs macOS. See below. |
 
-### The iOS situation, plainly
+The iOS app is built on a GitHub-hosted `macos-15` runner, because Xcode is macOS-only — there
+is no Windows build of it, and ARKit, SwiftUI, UIKit and SwiftData ship only in Apple's SDKs.
+To build it yourself you need either that CI job, any Mac with Xcode 16+, or a rented Mac
+(MacStadium, EC2 `mac`, MacinCloud, Codemagic).
 
-Xcode is macOS-only. There is no Windows build of it, and ARKit, SwiftUI, UIKit and SwiftData
-ship only in Apple's SDKs, so no toolchain on this machine can compile the iOS target. Three
-real options:
-
-1. **A Mac** — any Apple Silicon Mac with Xcode 16. `brew install xcodegen`, then
-   `cd ios && xcodegen generate && open CBMCapture.xcodeproj`. A physical iPhone is needed to
-   *run* it, since ARKit does not work in the Simulator.
-2. **GitHub Actions** — `.github/workflows/build.yml` already contains a `macos-15` job that
-   generates the project, compiles against the simulator SDK, and runs the tests. Free for a
-   public repository. This compiles 100% of the iOS code without you owning a Mac.
-3. **A rented Mac** — MacStadium, AWS EC2 `mac` instances, MacinCloud, or a Codemagic/Bitrise
-   build. Same as (1), by the hour.
-
-Until one of those runs, the iOS domain layer is corroborated rather than proven: it is a
-line-for-line port of the Kotlin that now passes the same 16 assertions.
+A **physical iPhone is still required to *run* it**: ARKit does not track in the Simulator, so
+CI proves the code compiles and its logic is correct, not that the camera path works.
 
 ### Not included
 

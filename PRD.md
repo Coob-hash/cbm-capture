@@ -425,8 +425,30 @@ publishable form.
 | **Mock server** | **Running and exercised.** 19/19 contract assertions pass, covering the happy path, idempotent replay, checksum mismatch, frame mismatch, out-of-frame target, untrusted intrinsics, and schema-version gating. |
 | **Contract** | **Validated.** The worked example validates against the JSON Schema and satisfies the frame invariant. |
 | **Transform arithmetic** | **Verified twice.** Independently in Python, then by the Kotlin suite: ray preservation under downscale, the ray rotating by (x,y)→(−y,x) per quarter-turn, the four-turn round trip, and the gate rejecting the real defect. |
-| **iOS app** | **Not compiled.** Xcode runs only on macOS; there is no Windows build and no workaround. Its domain layer is a line-for-line port of the Kotlin that now passes those 16 assertions, which is corroboration, not proof. Use the macOS CI job or a Mac. |
+| **iOS app** | **Built and tested.** Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`; **17/17 tests pass** on the simulator, via a GitHub-hosted `macos-15` runner. A physical iPhone is still needed to *run* the AR session — the Simulator does not track. |
 
-Three real defects were found and fixed by actually building: a missing `gradle.properties`
-(no `android.useAndroidX`), `android:authority` where the manifest needs `authorities`, and a
-missing launcher icon. All three were invisible to inspection and fatal to the build.
+CI: <https://github.com/Coob-hash/cbm-capture/actions>
+
+### What compiling actually caught
+
+Thirteen defects, none of which review had found. Three on Android — a missing
+`gradle.properties` (no `android.useAndroidX`), `android:authority` where the manifest needs
+`authorities`, and a missing launcher icon — two more in CI configuration (a pinned Xcode 16
+whose simulator runtime the image lacks, and a `-destination "id=…"` missing its `platform=`
+qualifier), and eight on iOS:
+
+| Defect | Why it mattered |
+|---|---|
+| `xcodebuild \| xcbeautify` without `pipefail` | **The CI reported a green tick over `** BUILD FAILED **`.** GitHub runs steps with `bash -e`, not `-eo pipefail`, so the pipeline's status was the formatter's. The worst defect of the nine: it made every other result untrustworthy. |
+| `static let` of an `ISO8601DateFormatter` | Non-`Sendable` class as shared mutable state — rejected outright under Swift 6. |
+| `#Unique` in the SwiftData model | Requires iOS 18; the deployment target is 17. |
+| `CIContext` in a `Sendable` struct | Thread-safe by documentation, but not annotated — needs `@unchecked`. |
+| `try?` assumed to nest optionals | It flattens. The outbox drain loop bound a non-optional and unwrapped it again. |
+| `UIDevice.current.systemVersion` | Main-actor isolated in Swift 6, read from a nonisolated context. |
+| `PRODUCT_NAME` with a space | Built `CBM Capture.app/CBM Capture` while `TEST_HOST` looked for `CBMCapture.app/CBMCapture` — the app built, every test run failed. |
+| `Info.plist` without `CFBundleExecutable` | A hand-written plist is used verbatim; the app built and linked, then failed at install. |
+
+Most of these are invisible to inspection and surface only at one specific stage — annotation
+processing, resource linking, app install, or test-host resolution. That is the argument for a
+real toolchain over careful reading, and it is why the `pipefail` defect was the serious one:
+it disabled the only mechanism that could find the others.
