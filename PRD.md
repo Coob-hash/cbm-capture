@@ -1,455 +1,641 @@
-# CBM Capture — Product Requirements Document
+# CBM App — Product Requirements Document
 
-**Product:** CBM Capture, the mobile front end of the Community-Based Maintenance end-of-day AI agent
-**Version:** 1.0 (PoC)
-**Date:** 27 August 2026
-**Status:** Specification complete, reference implementation delivered for both platforms
-**Supersedes:** the Google Drive photo-drop intake described in release `2026_07_13`
-
----
-
-## 1. Why this app exists
-
-The CBM pipeline turns a photograph of building damage into an exact IFC occurrence `GlobalId`.
-To do that it must unproject one pixel of that photograph into a 3D ray, which requires the
-camera's intrinsic matrix **K**. Today the pipeline invents K from environment variables:
-
-```js
-fx: Number($env.CAMERA_FX || 1200), fy: Number($env.CAMERA_FY || 1200),
-px: Number($env.CAMERA_PX || 960),  py: Number($env.CAMERA_PY || 540),
-```
-
-This has three consequences, established in *Device-Agnostic Camera Intrinsics for the CBM
-Spatial-Grounding Pipeline* (27 August 2026):
-
-1. **It is already wrong**, before any device change. The vision prompt asks for a bounding box
-   "in absolute image pixels", but the image dimensions are never interpolated into the prompt,
-   so `target_pixel` is expressed in the real image's pixel space while K describes an assumed
-   1920×1440 space. A stock 4032×3024 photograph unprojects a pixel from one coordinate system
-   using a principal point from another.
-2. **It fails open.** A wrong pose is caught by `MULTISET_CONFIDENCE_THRESHOLD` and routed to
-   `NEEDS_LOCALIZATION`. A wrong unprojection is not caught by anything: the ray rotates a few
-   degrees, hits a different element, and `resolve_ray` returns `found: true` with no confidence
-   signal attached. A technician is then dispatched to the wrong asset.
-3. **It cannot survive a device change,** and cannot handle lens switching even on one device.
-
-The root cause is architectural, not numeric. By the time an ordinary JPEG appears in Google
-Drive, the factory calibration that produced it is gone. **The only place the true K exists is
-on the handset, at the moment of capture.** This app is that place.
-
-Its second job follows from the first. Once a native app is capturing the frame, the worker can
-*tap the defect*, which retires the hallucinated bounding box: the ray's origin pixel becomes an
-observed fact rather than a language model's guess.
+**Product:** CBM App, the single mobile front end of the Community-Based Maintenance pipeline, with n8n as its backend
+**Version:** 2.0 (draft for discussion)
+**Date:** 19 September 2026
+**Status:** Requirements rewritten for role-based access. Decided 19 Sep 2026: authentication (Q1),
+Android-first on Kotlin Multiplatform (Q5), roles per site (Q6), self sign-up (Q8) — see § 14.
+Decided the same day: a dedicated App API over a shared database (Q2; Q3 falls away). Implemented and
+running: schema `cbm_app` and the API's account endpoints (`backend/`). Other details still open.
+**Supersedes:** PRD 1.0 of 27 August 2026 as the product definition. PRD 1.0 is kept, unchanged, as
+[`docs/PRD_v1_capture.md`](docs/PRD_v1_capture.md): its capture, intrinsics, queue and wire-contract
+requirements remain **normative** for the reporter's capture flow and are referenced, not repeated, here.
+**Backend baseline:** workflow release `16_09_2026 CBM OpenRouter Vision Release` (WF1 intake and
+dispatch, Technician Report Portal, WF2 completion approval, WF3 FM dashboard with guarded actions).
 
 ---
 
-## 2. Goals and non-goals
+## 1. Where things stand
+
+### 1.1 The app today (pre-alpha)
+
+| Area | State |
+|---|---|
+| Android (Kotlin, Compose, ARCore) | Builds, 16/16 unit tests pass, debug APK assembles. Four screens: Capture, Review, My Reports, Settings. |
+| iOS (Swift 6, SwiftUI, ARKit) | Builds on CI (macOS runner), 17/17 tests pass. Not yet run on a physical iPhone. |
+| Capture pipeline | Complete: factory K, tap-as-shutter, image/K/tap transform, plausibility gate, durable outbox. |
+| Contract | `POST /cbm/capture` multipart, JSON Schema + OpenAPI, mock server with 19/19 assertions. |
+| Identity | **None.** One shared bearer token per handset; reporter email is a free-text setting. |
+| Roles | **None.** Every user is a reporting worker. PRD 1.0 declared technician workflows and ticket browsing out of scope. |
+
+### 1.2 The integration gap with the current workflows
+
+The app's `server/` half was written against release `2026_07_13` and is **not compatible with the
+current backend**:
+
+| App assumes (2026_07_13) | Current backend (16_09_2026) |
+|---|---|
+| Staging table `maintenance_requests`, idempotency on `source_file_id` | Intake is `cbm_intake_reports` + `cbm_capture_attempts`, driven by `cbm_capture_begin()` / `cbm_capture_failed()` / `cbm_capture_identified()`; tickets are created in `PENDING_AUTHORIZATION` |
+| WF1 triggered by a webhook | WF1 triggered by a **Google Drive** `fileCreated` trigger; reporter email and report UUID are encoded in the file name (`report_<email>_<UUID>_<photo>.jpg`) |
+| One photo per report | Up to **four captures per report** (initial + 3 replacements) under one report UUID; the fourth failure opens an IT issue |
+| Factory K from the handset | Case-study pipeline uses `EXIF_ESTIMATE_NOT_FACTORY_CALIBRATION` — the problem the app was built to solve is still live |
+| Everything after capture happens by email | Still true: FM authorization (`/cbm-wf1-authorize`), technician offers (`/cbm-wf1-offer`), technician report (`/cbm-technician-report` portal → PDF → Drive), completion approval (shared email form) and the FM chat (n8n hosted chat, `n8nUserAuth`) are all separate web/email surfaces |
+
+So "merging the workflows with the app" means two things: (a) re-porting the capture intake onto the
+current intake functions, and (b) giving each email/web surface above an in-app equivalent for the
+role that uses it. The database functions and guards that make the workflows safe are **reused as-is**;
+the app never writes ticket state directly.
+
+---
+
+## 2. What v2 is
+
+**One app, one login screen, three role-specific experiences.** The role is *requested* at sign-up
+and *granted* by the server (§ 3); after login the app opens directly into the granted role's home
+and shows nothing belonging to the other roles.
+
+| Role | Login # | Home | In one sentence |
+|---|---|---|---|
+| **Reporter** (user) | 1 | My reports + "Open a report" | Take a photo of a problem, optionally say what is wrong, see what happened to it. |
+| **Technician** | 2 | Jobs dashboard | Accept proposed jobs, work them, fill the report template, see completed work. |
+| **Facility Manager (FM)** | 3 | Split screen: dashboard above, agent chat below | See the state of the building at a glance and act through the WF3 agent. |
+| Admin | — | *No app experience in v2* | Manages accounts and roles on the backend (§ 8). |
 
 ### Goals
 
 | # | Goal | Measured by |
-|---|------|-------------|
-| G1 | Every uploaded photograph carries factory-calibrated intrinsics for that exact frame | Share of captures with `camera.source ∈ {ARKIT, ARCORE, ANDROID_CAMERA2}` and `trusted: true` |
-| G2 | A capture whose calibration cannot be trusted is never silently unprojected | Zero packages accepted with `trusted: false` on the grounding path |
-| G3 | The target pixel is designated by the worker, not inferred | 100% of packages carry `target.source = USER_TAP` |
-| G4 | No report is lost to poor connectivity | Reports queued while offline that are eventually delivered: 100% |
-| G5 | A worker can file a report without training | Time from app open to sent report ≤ 15 s; one gesture to capture |
+|---|---|---|
+| G1 | Each role sees only what it needs and can do only what it is allowed to | Server-side role check on 100% of endpoints; zero cross-role data in responses (§ 12 tests) |
+| G2 | The app replaces email/web links as the primary channel for every role | Share of authorizations, offer responses, reports and approvals performed in-app |
+| G3 | No new path around the existing guards | Every state change goes through the same DB function the email/chat path uses |
+| G4 | The capture guarantees of PRD 1.0 survive intact | PRD 1.0 acceptance criteria 1–8 still pass |
+| G5 | A reporter files a report in ≤ 15 s; a technician submits a report without leaving the app | Timed walkthroughs |
 
-### Non-goals for v1
+### Non-goals for v2
 
-- **On-device MultiSet localization.** WF2 continues to call `query-form` server-side. Doing it
-  on the handset would duplicate working logic and put MultiSet credentials on every phone.
-- **Lens undistortion.** The pipeline assumes a pinhole model; v1 mitigates by rejecting
-  off-centre targets rather than by implementing a correction (§ 6.2 of the calibration note).
-- **Ticket browsing, technician workflows, AR overlays.** The app reports damage. Everything
-  after that stays in n8n.
-- **iPad, tablets, landscape capture UI.** Supported by the transform layer, not by the UI.
+- **Admin UI** in the app. Accounts are provisioned on the backend.
+- **Reporters seeing or acting on tickets.** They see the status of their own reports only.
+- **FM editing assets or GlobalIds.** Removed in release 2026.09.15 and stays removed.
+- **Technicians changing ticket status.** A submitted report is a declaration; WF2 and the FM decide.
+- **Replacing WF1/WF2/WF3 logic.** The app is a client of the workflows, not a re-implementation.
 
 ---
 
-## 3. Users
+## 3. Roles and permissions
 
-**Primary — the reporting worker.** Walks the building, finds damage, photographs it. Not
-technical, often wearing gloves, frequently with no signal in plant rooms and basements. Cares
-about one thing: *did my report get through?*
+The matrix below is the contract the server enforces. "Existing function" is what the app's
+endpoint ultimately calls, so the app inherits every guard those functions already carry.
 
-**Secondary — the facility manager.** Never opens the app. Receives the end-of-day batch report
-from WF2 and needs to know, per item, whether its location was machine-derived or needs a human.
+| Capability | Reporter | Technician | FM | Existing function / workflow reused |
+|---|:-:|:-:|:-:|---|
+| Take a photo and submit a report (+ optional description) | ✅ | — | — | WF1 capture path → `cbm_capture_begin()` |
+| Send a replacement photo when asked | ✅ own report | — | — | `cbm_capture_begin()` with the same `report_id` |
+| See status of own reports | ✅ own | — | — | `cbm_intake_reports`, `tickets` (read) |
+| Receive new job offers | — | ✅ own | — | Dispatch helpers, `CBM_DISPATCH_STATE` offers |
+| Accept / decline an offer | — | ✅ own | — | `cbm_record_offer_response()` → Dispatch - Process Responses |
+| See accepted jobs pending report (`ASSIGNED`, `REWORK`) | — | ✅ own | — | `tickets` where `technician_id` = self |
+| Fill and submit the report template | — | ✅ own job | — | `cbm_technician_report_access()` → `cbm_claim_technician_report()` → `cbm_record_technician_report()` → WF2 |
+| See completed-work dashboard | — | ✅ own | — | `tickets`, `cbm_technician_submissions` (read) |
+| Building dashboard (all tickets, KPIs) | — | — | ✅ | WF3 read queries |
+| Chat with the agent | — | — | ✅ | WF3 `FM Dashboard Agent` (9 read tools + 5 guarded actions) |
+| Authorize / reject intervention | — | — | ✅ | `approve_intervention` / `reject_intervention` → `cbm_authorize_dispatch()` |
+| Approve completion / request rework | — | — | ✅ | `approve_completion` / `request_rework` → Guarded FM Ticket Action |
+| Manage accounts and roles | — | — | — | Admin, backend only |
 
-**Tertiary — the researcher (you).** Needs `camera.source` and `device_model` recorded on every
-capture so that the hardcoded-K vs EXIF-K vs factory-K ablation in § 8 of the calibration note is
-computable from stored data.
+Rules that follow from the matrix:
 
----
-
-## 4. The core interaction
-
-> **The tap is the shutter.**
-
-The capture screen shows the camera feed and one instruction: **"Tap the damaged part."** A
-single tap simultaneously fires the shutter and designates the target pixel.
-
-This is not only a simplification for gloved hands. Separating the two — aim, shoot, then mark
-the defect on a still — would let the phone move between the frame and the designation, so the
-marked pixel would belong to a different view of the room than the photograph. Fusing them makes
-"the tap and the frame are the same instant" true by construction rather than by discipline.
-
-### Screen flow
-
-```
-                    ┌──────────────────────┐
-                    │   CAMERA (default)   │
-                    │                      │   badge: calibration state
-                    │  "Tap the damaged    │   badge: N reports queued
-                    │       part"          │
-                    └──────────┬───────────┘
-                               │ one tap
-                               ▼
-                    ┌──────────────────────┐
-                    │  CHECK THE PHOTO     │   photo + marker at the
-                    │                      │   *transformed* target pixel
-                    │  [warnings]          │   off-centre / untrusted K
-                    │  "What is wrong?"    │
-                    │  [Retake]   [Send]   │
-                    └──────────┬───────────┘
-                               │ Send
-                               ▼
-                    "Report saved. It will upload automatically."
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │     MY REPORTS       │   status per report,
-                    │  Waiting / Sending / │   retry on rejection
-                    │  Sent / Not accepted │
-                    └──────────────────────┘
-```
-
-**Settings** is a fourth screen, opened once at enrolment and then effectively never.
-
-### Two deliberate wording choices
-
-- On send, the worker is told **"saved"**, not "sent". The report is durable at that moment;
-  whether it has reached n8n is a separate fact shown on My Reports. Promising delivery the app
-  cannot yet guarantee is how a queue quietly loses the user's trust.
-- When K is untrusted, the worker sees **"Location will be checked by hand — you can still send
-  it."** Never an error, never a blocked path. The photograph is still valuable evidence; only
-  the automatic grounding is unavailable.
-
-### The marker as a self-check
-
-On the review screen, the marker is drawn from `metadata.target.pixel` over the transmitted JPEG
-— not from the raw screen tap. If the rotation applied to the pixels ever disagreed with the
-rotation applied to K and to the tap, the marker would visibly sit somewhere other than the
-damage the worker touched. The most dangerous class of bug in this app is therefore visible to a
-non-technical user on every single capture.
+- **Ownership is derived, never supplied.** A reporter's identity comes from the session, not from a
+  `reporter_email` field; a technician's `technician_id` comes from the session, not from the request.
+  Today both are client-supplied (file name / settings field / email link token) and v2 removes that.
+- **Roles belong to a site membership, not to the account.** One account (one email) can hold
+  several memberships — different sites, or two roles on one site. Each **session is bound to exactly
+  one membership**, so every screen and endpoint still serves a single role; switching role means
+  logging in again. This also covers several FMs across the places where the app is installed.
+- **A self-declared role is a request.** `USER` is active at sign-up. `TECHNICIAN` and `FM` stay
+  `PENDING` — the person can log in and sees "waiting for approval", nothing else — until approved:
+  a technician by an active FM of that site (which also links or creates the `technicians` row
+  used by dispatch); an FM by an admin of that site. The very first FM of a site is approved by the
+  database operator. Nobody approves their own request.
 
 ---
 
-## 5. Functional requirements
+## 4. Login and session
 
-### Capture
+### 4.1 From poster to first report
 
-- **FR-1** Read K from the highest-trust available source, recording which in `camera.source`:
-  ARKit / ARCore → Camera2 → EXIF. Never fabricate a value.
-- **FR-2** Capture the frame at the instant of the tap; map the tap to a sensor-frame pixel using
-  the platform's own view→image transform (`ARFrame.displayTransform`, ARCore
-  `transformCoordinates2d`), not a hand-rolled aspect-ratio calculation.
-- **FR-3** Rotate the image upright and downscale its long side to 1280 px, applying the identical
-  transform to K and to the target pixel in the same operation.
-- **FR-4** Evaluate the plausibility gate on the final transmitted-frame K and set
-  `camera.trusted` accordingly. Never repair a failing K.
-- **FR-5** Warn when `centrality > 0.6` and offer a retake.
-- **FR-6** Refuse to persist a package whose K, image dimensions, and target pixel are not in one
-  coordinate system.
+```
+ QR poster on site            Play Store                 First launch
+┌──────────────┐  scan   ┌──────────────┐ install  ┌──────────────────────────┐
+│  ▓▓ ▓ ▓▓ ▓   │ ──────► │ CBM  [Install]│ ───────► │ Maddaloni – Office       │ ← site from the QR
+│  ▓ ▓▓  ▓ ▓   │         └──────────────┘          │ [ Continue with Google ] │
+│ Report a     │   the site code travels through   │ ─────── or ───────       │
+│ problem here │   the store (Play Install         │ Email     [__________]   │
+└──────────────┘   Referrer) or the app's own      │ Password  [__________]   │
+                   deep link if already installed  │ I am a  (●) User         │
+                                                   │         ( ) Technician   │
+                                                   │         ( ) Facility mgr │
+                                                   │ [ Create account ]       │
+                                                   │ Have an account? Log in  │
+                                                   └──────────────────────────┘
+                                                        │ one-hour session
+                                                        ├── USER        → My reports + [Open a report]
+                                                        ├── TECHNICIAN  → Jobs dashboard   (after approval)
+                                                        └── FM          → Split dashboard  (after approval)
+```
 
-### Queue and delivery
+- **Sign-up is three fields**: email (the username), password, role. With Google it is one field —
+  the role — because Google supplies a verified email and name. The site is never typed: it comes
+  from the QR code. A person who installed the app some other way scans the QR from inside the app.
+- **Every use starts with a login.** A login opens a session of **exactly one hour**, never extended
+  by activity; after that the app returns to the login screen. The hour is a database constraint
+  (`cbm_app.sessions`), so no endpoint can issue a longer session by mistake.
+- **Password login**: bcrypt (cost 12) in PostgreSQL. Five wrong passwords lock the account for
+  15 minutes; an unknown email and a wrong password get the same answer. **Google login**: the app
+  obtains a Google ID token; n8n verifies its signature, audience and expiry and passes only the
+  verified claims to the database. A verified Google email may link to an existing password account
+  with the same email.
+- **Shared devices are allowed.** A device is not owned by anybody; any account can log in on any
+  device. The app keeps each account's data (outbox, drafts, cache) separate on the device, and
+  logging out removes the session token from the device.
+- **First login from a new device** needs nothing special: it is an ordinary login that also
+  registers the device (install id, model, app version). The server flags it (`new_device`) so that
+  a notification ("new sign-in on Pixel 8") can be sent — relevant above all for FMs. Push tokens
+  are per device.
+- **Queued reports and the one-hour rule.** A report captured while logged in stays in that
+  account's outbox if the session expires before it is uploaded (typical in basements). It is sent
+  after that person's next login and never under another account (acceptance test 8). Whether to
+  add a narrower "upload-only" credential so queued reports can go out without a login is open (Q11).
+- The session token lives in EncryptedSharedPreferences (PRD 1.0 FR-14); only its SHA-256 is stored
+  on the server.
+- Requests are never logged or echoed by the API, so passwords do not end up in any log (§ 9.1).
 
-- **FR-7** Persist the package to durable local storage before attempting any upload.
-- **FR-8** Retry on transient failure with exponential backoff capped at 15 minutes; stop
-  permanently on 400/401/413/422.
-- **FR-9** Treat HTTP 409 as success — the first attempt got through and the response was lost.
-- **FR-10** Show every report's status, with a manual retry for rejected ones.
-- **FR-11** Respect a "Wi-Fi only" preference; default to allowing mobile data.
+### 4.2 Role-specific branding of the login
 
-### Enrolment
+The login screen is shared, but after sign-in each role gets its own visual identity (accent colour,
+app bar title, navigation) so that a shared device can never be mistaken for another role's session:
 
-- **FR-12** Configure endpoint, bearer token, building ID, and reporter email on one screen.
-- **FR-13** Offer a "Test connection" probe that reports a building-ID mismatch explicitly.
-- **FR-14** Store the token in the platform keystore (iOS Keychain / Android
-  EncryptedSharedPreferences), never in plain preferences and never in a backup.
+| Role | Title | Accent | Navigation |
+|---|---|---|---|
+| Reporter | "My reports" | neutral / blue | none — one screen with the "Open a report" button |
+| Technician | "My jobs" | orange | bottom bar: Dashboard · Offers · To report |
+| FM | "Building overview" | dark / teal | none — split screen, profile menu |
 
 ---
 
-## 6. Architecture
+## 5. Reporter experience (login #1)
 
-### 6.1 Shape: offline-first client, thin HTTP boundary
+The reporter experience is PRD 1.0's app, narrowed and bound to an identity. Everything about the
+capture itself — tap-as-shutter, intrinsics, transform, gate, outbox, "saved, not sent" wording —
+is unchanged and specified in [`docs/PRD_v1_capture.md`](docs/PRD_v1_capture.md) §§ 4–7.
 
-Two native apps, one shared JSON contract, no shared runtime. The apps are **not** thin clients:
-they own a durable queue and a full transform pipeline, because the network is the least reliable
-component in the system and the calibration data cannot be reconstructed after the fact.
-
-```
-  ┌────────────────────────────────────────────┐
-  │  HANDSET                                    │
-  │                                             │
-  │  ARKit / ARCore ──► frame + K + pose         │
-  │        │                                     │
-  │        ▼                                     │
-  │  ImageTransform ──► rotate + scale           │   ← K, pixels, and tap
-  │        │              (image, K, tap)        │     move together
-  │        ▼                                     │
-  │  IntrinsicsGate ──► trusted / not            │
-  │        │                                     │
-  │        ▼                                     │
-  │  Outbox (SwiftData / Room + files)  ◄── durable, survives force-quit
-  │        │                                     │
-  │        ▼                                     │
-  │  Synchroniser (actor / WorkManager)          │
-  └────────┬────────────────────────────────────┘
-           │  multipart POST, bearer token
-           ▼
-  ┌────────────────────────────────────────────┐
-  │  n8n WF1  — Webhook /cbm/capture            │
-  │    validate package → validate K → stage    │
-  │    → Drive (image) + Postgres (metadata)    │
-  └────────┬────────────────────────────────────┘
-           ▼
-     WF2: MultiSet VPS → vision → K⁻¹[u,v,1]ᵀ → ray → IFC GlobalId
-```
-
-Google Drive stops being the intake mechanism and becomes image storage. This removes the
-correlation problem inherent in the two-file alternative (upload `report.jpg` and `report.json`
-separately, then teach WF1 to wait for both and match them).
-
-### 6.2 Layering, identical on both platforms
-
-| Layer | iOS | Android | Contains |
-|-------|-----|---------|----------|
-| Domain (pure) | `ImageTransform`, `IntrinsicsGate` | same names | The K arithmetic. No platform types, unit-tested on both. |
-| Capture | `ARCaptureSession`, `CaptureAssembler`, `PixelBufferRenderer` | `ArCameraController`, `CaptureAssembler`, `YuvConverter` | Frame acquisition and the pixel half of the transform |
-| Data | `OutboxStore` (SwiftData), `CaptureAPIClient` | Room + DAO, Retrofit + `CaptureUploader` | Durable queue, HTTP, failure classification |
-| Sync | `OutboxSynchronizer` (actor) | `UploadWorker` (WorkManager) | Draining the queue, backoff |
-| Presentation | SwiftUI + `@Observable` MVVM | Compose + ViewModel/StateFlow MVVM | Unidirectional state, one screen per feature |
-
-Both use constructor injection (a hand-rolled `AppContainer` on iOS, Hilt on Android), so the
-domain and assembly layers are testable without a device.
-
-### 6.3 Data model
-
-The client's model is deliberately narrow — it is a queue, not a mirror of the server:
+### 5.1 Screens
 
 ```
-OutboxRecord / OutboxEntity
-  capture_id        UUID, primary key, also the server's idempotency key
-  created_at        shutter time
-  metadata_json     the exact bytes that will be transmitted
-  image_path        JPEG on disk (SQLite is a poor place for megabytes)
-  thumbnail         small JPEG for the history list
-  status            QUEUED → UPLOADING → DELIVERED | REJECTED
-  attempt_count, next_attempt_at, last_error
-  server_request_id, server_status
-  intrinsics_source, intrinsics_trusted   (denormalised for the list UI)
+ MY REPORTS (home)                CAMERA                    CHECK THE PHOTO
+┌────────────────────────┐      ┌──────────────────┐       ┌──────────────────┐
+│ My reports     [⏻]     │      │ ● calibrated     │  tap  │ [photo + marker] │
+│ ▸ Door, 1st floor      │ ───► │                  │ ────► │ What is wrong?   │
+│   Being fixed          │      │ "Tap the damaged │       │ [optional, 500c] │
+│ ▸ Radiator, room 3     │      │      part"       │       │ [Retake] [Send]  │
+│   ⚠ Please take        │      └──────────────────┘       └────────┬─────────┘
+│     another photo  ▶   │                                          │ Send
+│                        │   "Report saved. It will upload automatically."
+│ [   Open a report   ]  │ ◄────────────────────────────────────────┘
+└────────────────────────┘
 ```
 
-Storing the serialised metadata rather than modelled columns means the document that was
-validated is byte-for-byte the document that gets sent.
+The home is a very small dashboard: the reporter's own reports with their status, and one large
+**Open a report** button that opens the camera. Tapping "Please take another photo" opens the camera
+bound to that same report.
 
-### 6.4 The invariant the whole design protects
+### 5.2 Requirements
 
-```
-camera.width  == image.width  == the JPEG's actual decoded width
-camera.height == image.height == the JPEG's actual decoded height
-0 ≤ target.pixel.x < image.width,  0 ≤ target.pixel.y < image.height
-```
+- **R-1** The reporter can do exactly two things: submit a photo with an optional description, and
+  see the status of their own reports. No ticket numbers, assets, technicians or costs are shown
+  beyond the plain-language status in R-4.
+- **R-2** Description is optional, free text, ≤ 500 characters, never required to send.
+- **R-3** Reporter identity comes from the session. The `reporter_email` field in the capture
+  metadata is removed from the client contract; the server fills it from the account.
+- **R-4** Report status is shown in plain language. The mapping is done once, in the database
+  (`cbm_app.reporter_reports()` returns a code: `RECEIVED`, `ANALYSING`, `PHOTO_NEEDED`,
+  `OFFICE_NOTIFIED`, `AWAITING_FM`, `NOT_SCHEDULED`, `IN_PROGRESS`, `FIXED`, `ALREADY_REPORTED`);
+  the app only translates codes into the user's language:
 
-Enforced in four independent places: by construction in `CaptureAssembler`, by an explicit
-assertion before the record is written, by the mock/real server on receipt, and visibly by the
-review-screen marker. See `docs/INTRINSICS.md` for the transform derivations.
+  | Backend state | Reporter sees |
+  |---|---|
+  | outbox `QUEUED` / `UPLOADING` | Waiting to send / Sending |
+  | intake `NEW`, `PROCESSING` | Received — being analysed |
+  | intake `AWAITING_PHOTO` | **Please take another photo** (n of 3 left) |
+  | intake `IT_ISSUE`, `CONFIGURATION_REQUIRED` | We could not locate it automatically — the office has been told |
+  | ticket `PENDING_AUTHORIZATION` | Waiting for the facility manager |
+  | ticket `REJECTED` | Not scheduled (with the FM's reason if the FM chose to share it — Q7) |
+  | ticket `LOCALIZED`, `DISPATCHING`, `ASSIGNED`, `REWORK`, `PENDING_APPROVAL`, `ESCALATED` | Being fixed |
+  | ticket `CLOSED` | Fixed ✓ |
+  | reused existing ticket (`DUPLICATE` outbox kind) | Already reported — being handled |
+
+- **R-5** **Replacement photo.** When a report enters `AWAITING_PHOTO`, the reporter gets a
+  notification. Opening it launches the camera bound to that report's `report_id`, so the new
+  capture counts as the next attempt of the same report (today this requires re-running
+  `Prepare-CaseStudyPhotos.ps1` with `-ReportId`). The remaining-attempt count is shown.
+- **R-6** A new report while another of the same reporter is still `PROCESSING` is allowed on the
+  device and queued; the server's existing `BUSY` handling applies only to the *same* report.
+- **R-7** Notifications for the reporter: another photo needed, report accepted for work,
+  report not scheduled, fixed. These replace the corresponding `cbm_intake_outbox` emails
+  (`RETRY`, `RECEIVED`, `DUPLICATE`, `REJECTED`, `FINISHED`); email stays as a fallback while the
+  app is rolled out (§ 11).
 
 ---
 
-## 7. The wire contract
+## 6. Technician experience (login #2)
 
-`POST /cbm/capture`, `multipart/form-data`, two parts: `image` (JPEG) and `metadata` (JSON).
-Full schema in `contract/capture-metadata.schema.json`; OpenAPI in `contract/openapi.yaml`.
+Today a technician receives an offer email, clicks a link to accept, later receives a report-portal
+link, fills an HTML form, downloads a PDF, and uploads it to a Drive folder. v2 collapses this into
+three sections of one app.
 
-```json
-{
-  "schema_version": "1.0.0",
-  "capture_id": "46ccbf7f-…",
-  "building_id": "ROOM-POC",
-  "reporter_email": "worker@example.com",
-  "description": "Door handle detached, door will not latch.",
-  "captured_at": "2026-08-27T18:32:14.482Z",
-  "client":  { "platform": "IOS", "device_model": "iPhone15,2", … },
-  "image":   { "width": 960, "height": 1280, "sha256": "…",
-               "orientation_applied": 1, "source_width": 1920, "scale": 0.667 },
-  "camera":  { "source": "ARKIT", "trusted": true,
-               "fx": 954.63, "fy": 955.07, "cx": 480.19, "cy": 639.65,
-               "width": 960, "height": 1280 },
-  "target":  { "pixel": { "x": 512.0, "y": 706.5 },
-               "source": "USER_TAP", "centrality": 0.104 },
-  "pose":    { "source": "ARKIT", "position": {…}, "rotation": {…},
-               "tracking_state": "NORMAL" }
-}
+### 6.1 Screens
+
+```
+ DASHBOARD (home)                OFFERS                         TO REPORT
+┌──────────────────────────┐   ┌──────────────────────────┐   ┌──────────────────────────┐
+│ This month               │   │ 🔔 NEW                    │   │ #42 Door handle, 1F      │
+│  Completed      7        │   │ #57 Radiator leak, R3    │   │   ASSIGNED · due Tue     │
+│  Awaiting FM    2        │   │ Sev 3 · plumbing         │   │   [ Fill report ]        │
+│  Rework         1        │   │ Proposed: Tue 09–12      │   │                          │
+│  Avg. days      2.4      │   │ Expires in 3h 12m        │   │ #38 Window frame, 2F     │
+│                          │   │ [photo]                  │   │   ⚠ REWORK: "seal still  │
+│ Recent                   │   │ [Decline]   [Accept]     │   │   leaking"               │
+│ ✓ #31 Closed  12 Sep     │   └──────────────────────────┘   │   [ Fill report ]        │
+│ ⏳ #40 Awaiting FM       │                                  └──────────────────────────┘
+├──────────────────────────┤
+│ Dashboard · Offers · To report │
+└──────────────────────────┘
 ```
 
-Two notes on the shape:
+### 6.2 Requirements
 
-- **Conventional CV notation.** `fx, fy, cx, cy` rather than the pipeline's current
-  `fx, fy, px, py`. WF2 renames on the way into MultiSet and `resolve-ray`.
-- **`pose` is advisory in v1.** The AR session's world frame has no relationship to the MultiSet
-  map or `T_VPS_TO_IFC`; feeding it to the ray resolver would produce a confidently wrong
-  GlobalId. It is transmitted so the ARKit pose and the VPS pose can be compared offline — the
-  end-to-end consistency check sketched in § 7 of the calibration note.
+**Offers — notification of new proposed jobs**
+
+- **T-1** When the dispatch agent reserves an offer for this technician, the app shows a push
+  notification and the offer appears in **Offers** with: asset, location/storey, issue description,
+  severity, required skill, proposed slot, before-photo, and the offer's expiry.
+- **T-2** Accept / Decline are explicit actions with a confirmation. They call the same response
+  path as the email link today (`cbm_record_offer_response()`), so expiry, "still eligible" and
+  first-valid-acceptance rules are unchanged. Opening an offer is not a response (same rule as GET
+  on the email link).
+- **T-3** An offer that expired, was withdrawn, or was won by someone else is shown as such and
+  cannot be acted on; the server's answer is authoritative.
+
+**To report — accepted jobs pending the report**
+
+- **T-4** Lists the technician's tickets in `ASSIGNED` and `REWORK`. A `REWORK` item shows the FM's
+  reason prominently. Items leave this list when a report is submitted for the current approval
+  cycle.
+- **T-5** **The report is the existing template, filled in-app — never a manual upload.** The form
+  is `cbm/templates/technician-report/submission.schema.json`:
+  - *prefilled and locked* from `cbm_technician_report_access()`: ticket, technician name/email,
+    asset, location, reported issue;
+  - *entered by the technician*: work date, findings, work performed, materials, checks, check
+    result, outcome (`COMPLETED` / `PARTIAL` / `NOT_COMPLETED`), remaining issues, declaration,
+    optional AFTER photo taken in-app with caption.
+- **T-6** Drafts are saved on the device and survive app restarts; submission uses the same durable
+  outbox as reporter captures, so a report written in a basement is delivered later.
+- **T-7** On submission the backend renders the PDF with the existing `report-pdf.js` renderer,
+  stores it where WF2 expects it and records it via `cbm_claim_technician_report()` /
+  `cbm_record_technician_report()`. The technician never sees a Drive folder or a file name.
+- **T-8** `outcome = COMPLETED` is labelled "I declare the work completed" and never implies closure.
+  After submission the job shows "Awaiting FM approval".
+
+**Dashboard — work completed**
+
+- **T-9** Counts for a selectable period (default: this month): completed & closed, awaiting FM
+  approval, sent back for rework, average days from assignment to closure; plus a recent-activity
+  list with status per job.
+- **T-10** Notifications: new offer, offer about to expire, rework requested (with reason), job
+  closed.
+- **T-11** A technician sees only their own offers and jobs.
 
 ---
 
-## 8. Platform specifics
+## 7. Facility Manager experience (login #3)
 
-### iOS
+### 7.1 The split screen
 
-Swift 6, SwiftUI, iOS 17+. ARKit via a RealityKit `ARView` that renders the passthrough feed;
-nothing is added to the scene, because the app needs ARKit for `camera.intrinsics`, not for
-rendering. `@Observable` MVVM, `async/await`, actors for the store and synchroniser, SwiftData
-for the queue, Keychain for the token, Swift Testing for the suite.
+The FM home is **one screen split horizontally**: a manager's dashboard on top, a chat with the
+WF3 agent below. Both halves are always visible, so the FM can look at a number and ask about it
+without changing screen.
 
-`ARFrame.camera.intrinsics` is expressed in the coordinate system of `imageResolution`, which is
-exactly the frame `capturedImage` occupies — the cleanest relationship of any platform, which is
-why the calibration note recommends implementing iOS first.
+```
+┌─────────────────────────────────────┐
+│ Building overview         [👤]      │
+│ ┌────────┐┌────────┐┌────────┐┌───┐ │
+│ │   3    ││   2    ││   1    ││ 5 │ │   KPI tiles (tap = filter the list below)
+│ │Authorize││Approve ││Escalated││>30d│ │
+│ └────────┘└────────┘└────────┘└───┘ │
+│ Needs you                            │
+│ #57 Radiator leak · Sev 3 · 2h  [›]  │   action queue, oldest first
+│ #42 Door handle · report in    [›]   │
+│ #33 Window · ESCALATED          [›]  │
+│ Open by status ▁▃▅▂  Tech load ▂▅▃  │   small charts
+├══════════════ ═══ ══════════════════┤   ← draggable divider
+│ 🤖 Good morning. 3 interventions are │
+│    waiting for your authorization.  │
+│ 👤 What's wrong with #57?            │
+│ 🤖 Radiator in room 3 is leaking at  │
+│    the valve (photo). Severity 3…    │
+│ 👤 Approve it.                       │
+│ 🤖 Approve intervention #57? [Yes]   │
+│ [ Ask about the building…    ] [➤]  │
+└─────────────────────────────────────┘
+```
 
-### Android
+### 7.2 Requirements
 
-Kotlin 2.1, Jetpack Compose, Material 3, minSdk 26. ARCore `Frame.camera.imageIntrinsics` is the
-direct counterpart and is the primary source. Below it sit two fallbacks:
+**Dashboard (top half)**
 
-- **Camera2 `LENS_INTRINSIC_CALIBRATION`**, which returns `[fx, fy, cx, cy, s]` in the
-  *pre-correction active array* coordinate system — neither the active array nor the saved JPEG.
-  `Camera2IntrinsicsReader` performs the rescale explicitly and documents its two assumptions
-  (no zoom, sensor-aspect output), both of which the plausibility gate catches if violated.
-- **EXIF**, the § 4 estimate.
+- **F-1** KPI tiles: awaiting my authorization (`PENDING_AUTHORIZATION`), awaiting completion
+  approval (`PENDING_APPROVAL`), escalated (`ESCALATED`), overdue > 30 days (WF3 definition), open
+  tickets total. Tapping a tile filters the action queue.
+- **F-2** **Action queue ("Needs you")**: every ticket waiting on an FM decision, oldest first, with
+  asset, severity, age, and photo thumbnail. Opening an item shows a detail sheet (issue, photos
+  before/after, technician report summary and AI assessment when present, history).
+- **F-3** Two small charts: open tickets by status, and open workload per technician (WF3
+  `ticket_counts`, `technician_workload`). Values come from the same read-only queries the agent
+  uses, so the dashboard and the chat can never quote different numbers.
+- **F-4** Data refreshes on open, on pull-to-refresh, and when a notification arrives.
 
-Hilt for DI, Room for the queue, WorkManager for delivery, DataStore + EncryptedSharedPreferences
-for settings, Retrofit/OkHttp for HTTP.
+**Chat (bottom half)**
+
+- **F-5** The chat is the existing WF3 `FM Dashboard Agent`, reached through an authenticated app
+  endpoint instead of the n8n hosted chat page. Memory (50 turns), the 9 read tools, the 5 guarded
+  action tools, the 1500-character limit, and `CBM_WF3_QUERY` logging are unchanged.
+- **F-6** **Dashboard → chat hand-off.** Every dashboard item has "Ask the agent", which inserts a
+  reference (e.g. "Ticket #57") into the chat input; it does not send on its own.
+- **F-7** **Actions stay explicit.** When the agent proposes a state-changing action, the app
+  renders it as a confirmation card (action, ticket, reason if required) with **Confirm / Cancel**.
+  Only Confirm causes the guarded action to run — this mirrors the existing rule that an action must
+  be explicitly requested by the authenticated FM in the current turn. **This is a change to WF3:**
+  today the agent runs an explicitly requested action in the same turn; v2 needs it to return a
+  structured proposal first and run the guarded action only on the confirming call.
+- **F-8** Action outcomes (`APPLIED`, `QUEUED`, `SENT`, `UNCONFIRMED`, `BLOCKED`, `INCOMPLETE`) are
+  shown verbatim with a plain-language explanation, and the dashboard refreshes after each one.
+- **F-9** **Adaptive split.** The layout is chosen at runtime from the window's size class
+  (Compose `WindowSizeClass`), not from a device list recorded at login — so it also follows
+  rotation, foldables and Android split-screen multitasking, and a new device needs no configuration:
+
+  | Window | Layout |
+  |---|---|
+  | Compact (phone, portrait) | Horizontal split: dashboard on top, chat below, default 55 / 45, draggable divider. Keyboard open → dashboard collapses to the KPI row. |
+  | Medium (small tablet, phone landscape, unfolded foldable) | Side by side, 50 / 50. |
+  | Expanded (tablet landscape, desktop window) | Side by side, dashboard 60 / chat 40, room for the ticket detail sheet next to the list. |
+
+  The divider position the FM chooses is remembered per device and size class.
+- **F-10** Notifications: new intervention to authorize, completion report ready for approval,
+  ticket escalated, closure incomplete. The existing FM emails remain as fallback (§ 11); the weekly
+  report stays an email.
 
 ---
 
-## 9. Non-functional requirements
+## 8. Admin (backend only)
 
-| | Requirement |
+No admin screens in the app. The admin, through the backend:
+
+- creates accounts and assigns exactly one role;
+- links a technician account to its `technicians` row (skills, zone, rating keep living there);
+- deactivates accounts (a deactivated technician also stops receiving offers — `technicians.active`);
+- revokes sessions/devices.
+
+---
+
+## 9. Backend: the App API over a shared database
+
+### 9.1 Principle — the app is independent of the workflows
+
+```
+ Phone ──HTTPS──► CBM App API ──► PostgreSQL cbm_demo ◄── n8n workflows
+                  (backend/)      cbm_app  │  public
+                                  (app)    │  (workflows)
+```
+
+- **The phone talks only to the App API** (`backend/`, FastAPI). It never calls n8n.
+- **The app owns its data** in schema `cbm_app`; the workflows own schema `public`; both live in the
+  same database. The app's role is to make the workflows usable in the field: a real photo taken
+  with the app replaces a file dropped in Drive, an in-app button replaces an email link.
+- **The workflows run on top of the app's data.** They read what the app wrote and act on it, as
+  they react to a new Drive file today. How n8n notices new rows is Q14.
+- **Rules that protect data are in PostgreSQL** (sessions, passwords, lockout, roles, ownership,
+  the capture invariant). The API adds HTTP, Google token verification, rate and size limits, and
+  never echoes or logs a request body.
+- **The API logs in as `cbm_app_api`**, which holds no table privileges and may only call the
+  app's entry functions. It cannot read or change workflow tables.
+- **One exception to "the API never calls n8n":** the FM chat (§ 7). The agent lives in WF3, so the
+  API forwards each chat turn to an internal n8n webhook that the phone cannot reach.
+- The app is installed by its own installer (`backend/deploy/Install-CbmApp.ps1`) as its own
+  Compose project, and never overwrites workflow files.
+
+### 9.2 Endpoints
+
+`/v1/auth/*`, `/v1/me` and `/healthz` are **implemented and running** (see `backend/README.md`).
+The rest are planned; "Backed by" names what the API calls or writes.
+
+| Endpoint | Role | Backed by | New or existing |
+|---|---|---|---|
+| `POST /v1/auth/signup`, `/v1/auth/signup/google` | anyone with a site code | `cbm_app.sign_up()` | ✅ running |
+| `POST /v1/auth/login`, `/v1/auth/login/google` | anyone | `cbm_app.login()` | ✅ running |
+| `POST /v1/auth/role` | logged in, >1 role | `cbm_app.select_membership()` | ✅ running |
+| `POST /v1/auth/logout` | logged in | `cbm_app.logout()` | ✅ running |
+| `GET /v1/me` | logged in, incl. pending | `cbm_app.me()` | ✅ running |
+| `POST /v1/memberships/{id}/decision` | FM (technician/user requests), admin (FM requests) | `cbm_app.decide_membership()` | DB done |
+| `POST /v1/devices` (push token) | all | device table | **new** |
+| `GET /v1/notifications?since=` | all | notification feed (§ 9.4) | **new** |
+| `POST /v1/captures` | reporter | `cbm_app.claim_capture()` → store image (Q15) → `cbm_app.attach_capture()` → workflows' `cbm_capture_begin()`; WF1 then runs VPS/IFC/vision on it (Q14) | contract **changed** (§ 9.3), DB done |
+| `GET /v1/reports` | reporter | `cbm_app.reporter_reports()` | DB done |
+| `GET /v1/tech/offers` | technician | live offers in `CBM_DISPATCH_STATE` for self | **new**, read-only |
+| `POST /v1/tech/offers/{ticket}/response` | technician | `cbm_record_offer_response()` → Dispatch - Process Responses | new wrapper, existing logic |
+| `GET /v1/tech/jobs` | technician | `tickets` in `ASSIGNED`/`REWORK` for self | **new**, read-only |
+| `GET /v1/tech/jobs/{ticket}/report` | technician | `cbm_technician_report_access()` (prefill) | new wrapper |
+| `POST /v1/tech/jobs/{ticket}/report` | technician | render PDF (`report-pdf.js`) → `cbm_claim_technician_report()` → store → `cbm_record_technician_report()` → WF2 | new wrapper, existing logic |
+| `GET /v1/tech/summary?from=&to=` | technician | read-only aggregate for self | **new**, read-only |
+| `GET /v1/fm/dashboard` | FM | WF3 read queries (`ticket_counts`, `overdue_tickets`, `technician_workload`, pending queues) | new wrapper, existing queries |
+| `GET /v1/fm/tickets/{id}` | FM | WF3 `ticket_lookup` / `ticket_history` | new wrapper |
+| `POST /v1/fm/chat` | FM | internal n8n webhook → WF3 `FM Dashboard Agent`, `sessionId` = account (the one API → n8n call, § 9.1) | new trigger, existing agent |
+
+The technician's offer and report endpoints replace token-in-URL links. The link tokens stay valid
+for the email fallback; the app endpoints authenticate by session and resolve ownership in the database.
+
+### 9.3 Capture contract changes (`contract/`, schema 1.0.0 → 2.0.0)
+
+| Field | Change | Why |
+|---|---|---|
+| `report_id` | **added**, UUID, generated by the app for a new report and reused for its replacement photos | Current intake groups up to 4 captures under one report; it is also the `cbm_intake_reports.id` |
+| `capture_id` | kept; primary key of `cbm_app.report_photos`, so a replayed upload is recognised before the image is stored twice. The intake's attempt key is the image's storage reference (Q15) | Idempotency |
+| `building_id` | kept; must equal the session's site | A report cannot be filed into another site |
+| `reporter_email` | **removed** from the client payload; server derives it from the session | Identity must not be client-supplied |
+| `description` | kept, optional, ≤ 500 chars | R-2 |
+| `camera`, `target`, `image`, `pose` | unchanged | PRD 1.0 § 7 |
+
+WF1 gains a webhook entry that feeds the existing `One Capture Input` sub-flow alongside the Drive
+trigger (the Drive path stays for the demo and as fallback). The image is still stored in Drive, so
+`photo_url` and everything downstream of it is unchanged. The server-side intrinsics changes of
+PRD 1.0 § 10 (read K from the package, fail closed on untrusted K, give the vision prompt real
+dimensions, prefer the tap over a bounding box) are **re-applied to the current WF1 vision/IFC
+chain**; the old `server/` folder targeting `maintenance_requests` was removed on 19 Sep 2026.
+
+### 9.4 Notifications
+
+The backend already produces the events each role needs; today they are delivered only as email:
+
+| Event source (existing) | Recipient role | App notification |
+|---|---|---|
+| `cbm_intake_outbox` kinds `RETRY`, `RECEIVED`, `DUPLICATE`, `REJECTED`, `FINISHED` | reporter | R-7 |
+| offer reserved in `CBM_DISPATCH_STATE` | technician | new offer (T-1) |
+| `REWORK` transition, `CLOSED` transition (`CBM_STATUS_CHANGED`) | technician | T-10 |
+| `cbm_intake_outbox` kind `AUTHORIZATION` | FM | F-10 |
+| `PENDING_APPROVAL` transition, `ESCALATED` transition | FM | F-10 |
+
+The app notification is an **additional channel** on the same event, claimed and receipted like the
+emails, so an event is never "sent" by one channel and lost by the other. Delivery mechanism (push
+vs polling) is Q4.
+
+---
+
+## 10. Data model (backend)
+
+**Implemented and live** in schema `cbm_app`, owned by the app: `backend/migrations/001_app_schema.sql`
+(tables and functions, repeatable) and `002_api_role.sql` (the API's login). Tested by
+`backend/tests/run-tests.sh` (SQL suite + 15 API tests) against a structure-only copy of the live
+workflow schema, with every migration applied twice. On 19 Sep the first version, created that
+morning in `public`, was moved into `cbm_app` by a guarded one-off script (only the site `ROOM-POC`
+and its access code existed).
+
+```
+ cbm_app.sites ──< site_access_codes            (the code printed in the QR)
+     │
+     └──< memberships >── users ──1:1── password_credentials
+          role USER|TECHNICIAN|FM|ADMIN │   └──< external_identities (GOOGLE)
+          status PENDING|ACTIVE|…       │
+          technician_id ──> public.technicians
+                                        ├──< sessions ──> devices     exactly 1 h, one membership
+                                        └──< login_events (audit)
+
+ cbm_app.reports (id = public.cbm_intake_reports.id, description ≤ 500)
+     └──< report_photos (capture_id PK, K, tap, pose, sha256, note ≤ 500)
+             ──> public.cbm_capture_attempts(file_id)  ← the workflows' four-attempt intake
+```
+
+| Rule | Where it is enforced |
 |---|---|
-| **Performance** | Tap → review screen ≤ 1.5 s on a 4-year-old handset. JPEG encoding never on the main thread. |
-| **Payload** | ≤ 1280 px long side, JPEG q85 — typically 200–400 KB, uploadable over a weak site connection. |
-| **Storage** | Full-size JPEG deleted on delivery; only the thumbnail is retained for history. |
-| **Reliability** | Queue survives force-quit and reboot; rows stuck in `UPLOADING` are recovered at launch. |
-| **Security** | Token in the platform keystore; HTTPS expected, plain HTTP flagged in the UI, not silently accepted; app data excluded from cloud backup and device transfer. |
-| **Privacy** | Photographs of a customer's building. Nothing leaves the device except to the configured endpoint. No analytics, no third-party SDKs. |
-| **Accessibility** | Single large target; all controls labelled; Dynamic Type honoured on the review and reports screens. |
+| Session ≤ 1 hour, never extended | `CHECK (expires_at <= created_at + 1 h)`; `authenticate()` never updates `expires_at` |
+| Tokens never stored | only `SHA-256(token)`; the token is returned once, at login |
+| Passwords | bcrypt cost 12 (`pgcrypto`), in a separate table |
+| Self-chosen role is only a request | `sign_up()`: `USER` active, others `PENDING`; `ADMIN` not selectable |
+| Active technician ⇒ linked `technicians` row, one account per row | `CHECK` + partial unique index |
+| Frame invariant of the capture (K, image, tap in one coordinate system) | `CHECK`s on `report_photos` |
+| Reporter sees and writes only own reports, only in the session's site | `claim_capture()`, `attach_capture()`, `reporter_reports()` |
+| Reporter email in intake comes from the account, not the client | `attach_capture()` → `public.cbm_capture_begin()` |
+| The API reaches data only through entry functions | `cbm_app_api`: no table grants; functions `SECURITY DEFINER` with fixed `search_path`; the operator approval path is refused to it |
+
+Not yet built: notifications (§ 9.4), image storage (Q15), and scoping of `tickets` by site — the
+latter belongs to the multi-FM discussion.
+
+The app's `building_id` is the site id: `ROOM-POC`, "Maddaloni Office", the value of the
+workflows' `CBM_BUILDING_ID`.
+
+On the device, the Room / SwiftData outbox of PRD 1.0 § 6.3 gains a `kind` column
+(`CAPTURE` | `TECH_REPORT`) and an `account_id`, so both queued captures and queued technician
+reports survive restarts and are never delivered under a different account.
 
 ---
 
-## 10. Server-side changes this app requires
+## 11. Rollout
 
-**Implemented, in `server/`.** The migration is verified against a real PostgreSQL 16 with the
-release 2026_07_13 schema applied; the workflow Code nodes' JavaScript is executed against
-fixtures under Node. See `server/README.md` for deployment.
+**Android only.** iOS is set aside: the Swift code stays in the repository, frozen, and no iOS target
+is built for v2. The shared code is organised as Kotlin Multiplatform (`shared` module + `androidApp`),
+so an iOS target can be added later without restructuring (Q5).
 
-| Component | Change |
-|-----------|--------|
-| **WF1** | Replace the Drive trigger with a `Webhook` node at `POST /cbm/capture` (Header Auth credential). Add `Validate Capture Package` → `Intrinsics Valid?` → `Stage Request Idempotently` → upload image to Drive. |
-| **WF1** | Add `GET /cbm/capture/health` returning `{ok, building_id, schema_version}`. |
-| **Postgres** | `ALTER TABLE maintenance_requests ADD COLUMN camera_intrinsics jsonb;` — `jsonb` because iOS and Android carry slightly different fields. Stage with `source_system = 'mobile_app'` and `source_file_id = capture_id`, which the existing `UNIQUE (source_system, source_file_id)` index turns into idempotency for free. |
-| **WF2** | `Prepare Image and Intrinsics` reads `$json.camera_intrinsics` instead of `$env.CAMERA_*`; map `cx→px`, `cy→py`. Delete the `CAMERA_*` environment fallback entirely. |
-| **WF2** | Extend `Localization Trusted?` to also require trusted intrinsics, converting the fail-open unprojection into fail-closed. |
-| **WF2** | Interpolate the real `width`/`height` into the vision prompt, or drop the bounding-box request altogether now that `target.pixel` is supplied. |
-| **`.env`** | Remove `CAMERA_WIDTH/HEIGHT/FX/FY/PX/PY`. |
+| Phase | Reporter | Technician | FM |
+|---|---|---|---|
+| **0 — structure** | move the Android code into KMP modules; no behaviour change, the 16 tests still pass | | |
+| **1 — identity** | QR → sign-up/login; capture via webhook into current WF1; status list | sign-up, "waiting for approval" | sign-up, approve technicians |
+| **2 — technician** | notifications | offers, accept/decline, in-app report, dashboard | — |
+| **3 — FM** | — | — | split dashboard + chat, confirmation cards |
+| **4 — email off** | email fallback disabled per account once the app is confirmed on their device | same | same (weekly report stays email) |
 
-Until they exist, `mock-server/main.py` implements the same contract and the same seven checks.
-
----
-
-## 11. Acceptance criteria
-
-1. On an ARKit device, a capture produces `camera.source = ARKIT`, `trusted = true`, and
-   `camera.{width,height}` equal to the decoded JPEG's dimensions.
-2. The same on an ARCore device with `ARCORE`; on a non-ARCore device, `ANDROID_CAMERA2` or
-   `EXIF`, with the source recorded truthfully.
-3. Rotating the phone through all four orientations and capturing the same target yields a
-   marker that lands on that target in every case.
-4. Feeding K for a 1920×1440 frame with a 4032×3024 image is rejected as `FRAME_MISMATCH`.
-5. Airplane mode: three captures queue, all three deliver after connectivity returns.
-6. Killing the app mid-upload loses nothing; the row returns to `QUEUED` at next launch.
-7. Re-POSTing a delivered `capture_id` returns `duplicate: true` and creates no second request.
-8. Both test suites pass; the rotation identity holds for all four quarter-turns on both platforms.
-
-### The measurement this enables
-
-With `camera.source` and `device_model` on every record, § 8 of the calibration note becomes a
-query rather than a study: photograph known elements from marked positions with 2–3 phones,
-record whether the resolved `GlobalId` is correct and how far the ray hit lands from the true
-centroid, and group by source. That yields the hardcoded-K vs EXIF-K vs factory-K ablation in
-publishable form.
+Every phase keeps the email/Drive path working, so the case-study demo is never broken by an
+unfinished app phase.
 
 ---
 
-## 12. Risks
+## 12. Acceptance criteria (new in v2; PRD 1.0's eight still apply to capture)
+
+1. Signing in with a reporter, a technician and an FM account on the same device opens three
+   different homes; no screen of one role is reachable from another's session.
+2. Every role-restricted endpoint returns 403 to the other two roles, and a technician requesting
+   another technician's offer or job gets 404 (not 403, to avoid confirming it exists).
+3. A reporter capture creates a `cbm_intake_reports` row with the account's email, without the
+   client sending an email; a failed identification produces an in-app "take another photo"
+   prompt, and the replacement is recorded as attempt 2 of the same report.
+4. A technician accepts an offer in-app; the ticket reaches `ASSIGNED` through the unchanged
+   dispatch helper, and the email link for the same offer then reports it as already answered.
+5. A technician submits the report in airplane mode; it is delivered when connectivity returns,
+   WF2 receives a PDF identical in content to the portal's, and the ticket reaches
+   `PENDING_APPROVAL`.
+6. The FM dashboard counts equal the agent's answer to "how many tickets in each status?" at the
+   same moment.
+7. An FM action proposed by the agent does nothing until Confirm is tapped; confirming a stale
+   action returns `BLOCKED` and changes nothing.
+8. Sign-out with queued captures, then sign-in as a different account: the queued captures are not
+   sent under the new account.
+
+---
+
+## 13. Risks
 
 | Risk | Mitigation |
-|------|------------|
-| Camera2 intrinsics absent or wrong on a given handset | Three-level fallback; the plausibility gate catches a bad rescale; source recorded so bad devices are identifiable in the data |
-| Worker taps a surface, not the defect | Review screen shows the marker before sending; retake is one tap |
-| Ultra-wide distortion invalidates the pinhole model | Centrality warning at 0.6; distortion coefficients carried for a future correction |
-| AR session fails to start (poor light, unsupported device) | Android degrades to the Camera2/EXIF path; iOS requires ARKit and declares it in `UIRequiredDeviceCapabilities` |
-| PoC bearer token shared across handsets | Acceptable for a PoC and stated as such; per-device tokens are a v2 change with no client-side redesign |
-| Two codebases drift | The domain layer is duplicated deliberately and its test suites assert identical identities, so drift fails a build rather than corrupting a GlobalId |
+|---|---|
+| Three role UIs on two native codebases triples UI work | Resolved by Q5: one Compose Multiplatform UI, Android first; capture stays native |
+| App endpoints become a second, weaker path to state changes | Endpoints only call existing guarded functions; § 12 tests 2, 4, 7 |
+| Email and app both deliver the same notice twice, or neither | Same event key, claimed once per channel, receipted (§ 9.4) |
+| FM chat over a phone keyboard is slower than the web chat | Dashboard hand-off (F-6), suggested prompts, tablet side-by-side layout |
+| Technician report PDF differs between portal and app | Single renderer (`report-pdf.js`), server-side, acceptance test 5 |
+| Shared devices on site | Role-specific branding (§ 4.2), explicit sign-out, per-account outbox (test 8) |
 
 ---
 
-## 13. What ships in this delivery
+## 14. Open questions — for the implementation discussion
 
-- `ios/` — complete SwiftUI + ARKit implementation, 19 Swift sources + a test suite,
-  plus `project.yml` so `xcodegen generate` produces the Xcode project deterministically
-- `android/` — complete Compose + ARCore implementation, 25 Kotlin sources + a test suite,
-  Gradle build with a version catalogue
-- `contract/` — JSON Schema, OpenAPI 3.1, worked example
-- `docs/INTRINSICS.md` — normative transform spec with derivations
-- `mock-server/` — FastAPI stand-in implementing the contract and all seven checks
-- `tools/env.ps1`, `tools/env.sh` — put the installed toolchains on PATH
-- `.github/workflows/build.yml` — Android, iOS (macOS runner), and contract jobs
-- this PRD
+| # | Question | Options to discuss |
+|---|---|---|
+| Q1 | ~~How are users authenticated?~~ **Decided 19 Sep** | Own accounts in PostgreSQL: email + password (bcrypt) or Google sign-in; one-hour sessions, a login at every use; implemented in `backend/` (schema `cbm_app`) (§ 4.1, § 10) |
+| Q2 | ~~Where do the app endpoints live?~~ **Decided 19 Sep** | A dedicated App API (`backend/`) over the shared database; the phone never calls n8n (§ 9.1) |
+| Q3 | ~~One webhook per endpoint, or per role?~~ **Moot** | With Q2 = App API, the phone reaches no n8n webhook; what remains is Q14 |
+| Q4 | Notifications | FCM + APNs push · polling `GET /v1/notifications` (no Google/Apple dependency, fine for a PoC) · both |
+| Q5 | ~~Stay with two native apps?~~ **Decided 19 Sep** | Kotlin Multiplatform + Compose Multiplatform, **Android only for now**; iOS set aside (§ 11) |
+| Q6 | ~~Can one person hold two roles?~~ **Decided 19 Sep** | Yes: roles are site memberships; one account can hold several; each session is bound to one (§ 3) |
+| Q7 | What does a reporter see when the FM rejects? | generic "not scheduled" · FM's reason · FM chooses per decision |
+| Q8 | ~~Reporter accounts~~ **Decided 19 Sep** | Named accounts, self sign-up from the site QR code; USER active at once, TECHNICIAN/FM approved (§ 3, § 4.1) |
+| Q9 | Languages | Italian + English, as the technician template already is |
+| Q10 | Should the FM have direct approve/reject buttons on the dashboard, or only via the chat? | chat-only with confirmation cards (current proposal) · buttons calling the same guarded helper |
+| Q11 | Queued reports after the hour expires | wait for the next login (current rule) · a narrow upload-only credential issued at login, valid e.g. 24 h, usable only to deliver captures already in that account's outbox |
+| Q12 | Several FMs and several places (to be discussed) | tickets scoped by site; which FM receives an authorization request; whether an FM can see more than one site; who is the site's admin |
+| Q13 | Distribution before the Play Store | Play Console internal-testing track (the QR still works through the store) · direct APK download, where the QR carries the site code as a deep link instead |
+| Q14 | ~~How do the workflows notice new app rows?~~ **Decided 19 Sep** | `NOTIFY cbm_app_capture` received by a Postgres Trigger in WF1, plus a sweep on the existing one-minute tick. Built for captures; WF1's app branch joins the Drive branch at `Capture Input` (`backend/n8n/README.md`) |
+| Q15 | ~~Where are capture images stored?~~ **Decided 19 Sep** | On the App API's own volume; WF1 fetches them from the internal image service (`cbm-app-internal:8081`, not published). The Drive branch stays until it is deleted |
+| Q16 | How does the phone reach the API over HTTPS? | a reverse proxy on the existing ngrok domain in front of n8n and the API · a second tunnel/domain for the API. Until then: LAN testing with test accounts only |
 
-### Verification status
+---
 
-| Component | State |
-|-----------|-------|
-| **Android app** | **Built and tested.** 25 sources compile to 221 classes; KSP, Hilt and Room annotation processing clean; **16/16 unit tests pass**; a 21.79 MB `app-debug.apk` assembles and inspects correctly (`ai.cbm.capture.debug`, minSdk 26, targetSdk 35, ARCore declared optional). |
-| **Mock server** | **Running and exercised.** 19/19 contract assertions pass, covering the happy path, idempotent replay, checksum mismatch, frame mismatch, out-of-frame target, untrusted intrinsics, and schema-version gating. |
-| **Contract** | **Validated.** The worked example validates against the JSON Schema and satisfies the frame invariant. |
-| **Transform arithmetic** | **Verified twice.** Independently in Python, then by the Kotlin suite: ray preservation under downscale, the ray rotating by (x,y)→(−y,x) per quarter-turn, the four-turn round trip, and the gate rejecting the real defect. |
-| **iOS app** | **Built and tested.** Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`; **17/17 tests pass** on the simulator, via a GitHub-hosted `macos-15` runner. A physical iPhone is still needed to *run* the AR session — the Simulator does not track. |
+## 15. What exists vs. what v2 needs
 
-CI: <https://github.com/Coob-hash/cbm-capture/actions>
-
-### What compiling actually caught
-
-Thirteen defects, none of which review had found. Three on Android — a missing
-`gradle.properties` (no `android.useAndroidX`), `android:authority` where the manifest needs
-`authorities`, and a missing launcher icon — two more in CI configuration (a pinned Xcode 16
-whose simulator runtime the image lacks, and a `-destination "id=…"` missing its `platform=`
-qualifier), and eight on iOS:
-
-| Defect | Why it mattered |
-|---|---|
-| `xcodebuild \| xcbeautify` without `pipefail` | **The CI reported a green tick over `** BUILD FAILED **`.** GitHub runs steps with `bash -e`, not `-eo pipefail`, so the pipeline's status was the formatter's. The worst defect of the nine: it made every other result untrustworthy. |
-| `static let` of an `ISO8601DateFormatter` | Non-`Sendable` class as shared mutable state — rejected outright under Swift 6. |
-| `#Unique` in the SwiftData model | Requires iOS 18; the deployment target is 17. |
-| `CIContext` in a `Sendable` struct | Thread-safe by documentation, but not annotated — needs `@unchecked`. |
-| `try?` assumed to nest optionals | It flattens. The outbox drain loop bound a non-optional and unwrapped it again. |
-| `UIDevice.current.systemVersion` | Main-actor isolated in Swift 6, read from a nonisolated context. |
-| `PRODUCT_NAME` with a space | Built `CBM Capture.app/CBM Capture` while `TEST_HOST` looked for `CBMCapture.app/CBMCapture` — the app built, every test run failed. |
-| `Info.plist` without `CFBundleExecutable` | A hand-written plist is used verbatim; the app built and linked, then failed at install. |
-
-Most of these are invisible to inspection and surface only at one specific stage — annotation
-processing, resource linking, app install, or test-host resolution. That is the argument for a
-real toolchain over careful reading, and it is why the `pipefail` defect was the serious one:
-it disabled the only mechanism that could find the others.
+| Component | Exists | v2 work |
+|---|---|---|
+| Capture, intrinsics, outbox (iOS + Android) | ✅ built and tested | bind to account; add `report_id`; replacement-photo entry point |
+| Capture contract | ✅ 1.0.0 | 2.0.0 (§ 9.3) |
+| Reporter status list | ✅ local outbox only | server status mapping (R-4) |
+| Login, roles, sessions | ✅ database + API endpoints, live and tested (`backend/`) | Android screens; HTTPS exposure (Q16) |
+| Reporter photo + description records | ✅ database, `POST /v1/captures`, `GET /v1/reports`, image store, WF1 app branch (imported, unpublished) | Android capture screens; publish WF1 |
+| Technician offers / jobs / dashboard | — (email + web portal) | new client screens; thin endpoints over existing functions |
+| Technician report template | ✅ schema + renderer + portal | in-app form; server-side PDF |
+| FM dashboard | — (weekly email only) | new client screen over WF3 queries |
+| FM chat | ✅ WF3 agent on n8n hosted chat | app chat endpoint + confirmation cards |
+| WF1 intake of app photos on the current schema | ✅ WF1 app branch (`backend/n8n/`), imported unpublished | publish WF1 |
+| Notifications | ✅ email outbox | app channel on the same events |
