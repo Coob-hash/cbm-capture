@@ -74,11 +74,15 @@ def test_session_lasts_one_hour(client):
     assert 3500 < remaining.total_seconds() <= 3600
 
 
-def test_technician_request_is_pending(client):
+def test_technician_joins_freely_and_only_fm_waits(client):
     _, r = sign_up(client, role="TECHNICIAN")
     assert r.status_code == 201
     me = client.get("/v1/me", headers=auth(r.json()["token"])).json()
-    assert me["membership"]["role"] == "TECHNICIAN" and me["membership"]["status"] == "PENDING"
+    assert me["membership"]["role"] == "TECHNICIAN" and me["membership"]["status"] == "ACTIVE"
+    assert isinstance(me["membership"]["technician_id"], int)
+    _, r = sign_up(client, role="FM")
+    me = client.get("/v1/me", headers=auth(r.json()["token"])).json()
+    assert me["membership"]["role"] == "FM" and me["membership"]["status"] == "PENDING"
 
 
 def test_role_choice_when_holding_two_roles(client, owner):

@@ -142,9 +142,9 @@ fun SignUpScreen(
             }
         }
     }
-    if (state.role != RequestableRole.USER) {
+    if (state.role == RequestableRole.FM) {
         Text(
-            "A ${state.role.label.lowercase()} account is active once it has been approved. You can log in meanwhile.",
+            "A facility manager account is active once the operator has approved it. You can log in meanwhile.",
             style = MaterialTheme.typography.bodyMedium
         )
     }

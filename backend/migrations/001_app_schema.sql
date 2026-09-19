@@ -2,9 +2,10 @@
 -- to the workflows' public schema in the same database. Repeatable (IF NOT EXISTS / OR REPLACE).
 --
 -- Accounts log in with email + password (bcrypt, pgcrypto) or Google. A login opens a session that
--- lasts exactly one hour and is never extended. The role lives on a site membership: USER is active
--- at sign-up, TECHNICIAN and FM wait for approval. reports / report_photos hold the reporter's
--- photo + description and hand each capture to the workflows' intake (public.cbm_capture_begin).
+-- lasts exactly one hour and is never extended. The role lives on a site membership: USER and
+-- TECHNICIAN are active at sign-up (the app is open to anyone who has the site's code); only FM
+-- waits for approval by the operator. reports / report_photos hold the reporter's
+-- photo + description; WF1 takes each capture into the workflows' intake (public.cbm_capture_begin).
 --
 -- Every function is SECURITY DEFINER with a fixed search_path: the API's login (002_api_role.sql)
 -- holds no table privileges and reaches data only through the entry functions granted to it.
@@ -234,7 +235,7 @@ END $$;
 CREATE OR REPLACE FUNCTION cbm_app.sign_up(p jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
 DECLARE g jsonb := p->'google'; v_role text := upper(coalesce(p->>'role','')); v_site text;
- v_email text; v_method text; did uuid; uid uuid; v_status text;
+ v_email text; v_method text; did uuid; uid uuid; v_status text; tid integer;
 BEGIN
  IF v_role NOT IN ('USER','TECHNICIAN','FM') THEN RETURN jsonb_build_object('status','INVALID_ROLE'); END IF;
  SELECT s.id INTO v_site FROM site_access_codes c JOIN sites s ON s.id=c.site_id
@@ -264,10 +265,24 @@ BEGIN
  ELSE
   INSERT INTO external_identities(provider,subject,user_id,email) VALUES ('GOOGLE',g->>'subject',uid,v_email);
  END IF;
- -- A self-declared role is a request. Only USER is granted without a decision.
- v_status := CASE WHEN v_role='USER' THEN 'ACTIVE' ELSE 'PENDING' END;
- INSERT INTO memberships(user_id,site_id,role,status,decided_at)
- VALUES (uid,v_site,v_role,v_status,CASE WHEN v_status='ACTIVE' THEN clock_timestamp() END);
+ -- USER and TECHNICIAN are open roles. FM can authorize work and close tickets, so it stays a
+ -- request until the operator approves it.
+ v_status := CASE WHEN v_role='FM' THEN 'PENDING' ELSE 'ACTIVE' END;
+ IF v_role='TECHNICIAN' THEN
+  -- The workflows dispatch to public.technicians. Link the row with this email if there is one and
+  -- no account drives it yet (it keeps its skills); otherwise create one with no skills, which
+  -- dispatch never selects until skills are set.
+  SELECT t.id INTO tid FROM public.technicians t WHERE lower(t.email)=v_email
+   AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.technician_id=t.id AND m.status='ACTIVE')
+  ORDER BY t.id LIMIT 1;
+  IF tid IS NULL THEN
+   INSERT INTO public.technicians(full_name,email,skills)
+   VALUES (coalesce(left(nullif(btrim(coalesce(p->>'display_name',g->>'name')),''),150),v_email),v_email,'{}')
+   RETURNING id INTO tid;
+  END IF;
+ END IF;
+ INSERT INTO memberships(user_id,site_id,role,status,decided_at,technician_id)
+ VALUES (uid,v_site,v_role,v_status,CASE WHEN v_status='ACTIVE' THEN clock_timestamp() END,tid);
  RETURN open_session(uid,did,v_method,'SIGNED_UP');
 END $$;
 

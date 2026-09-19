@@ -111,11 +111,13 @@ Rules that follow from the matrix:
   several memberships — different sites, or two roles on one site. Each **session is bound to exactly
   one membership**, so every screen and endpoint still serves a single role; switching role means
   logging in again. This also covers several FMs across the places where the app is installed.
-- **A self-declared role is a request.** `USER` is active at sign-up. `TECHNICIAN` and `FM` stay
-  `PENDING` — the person can log in and sees "waiting for approval", nothing else — until approved:
-  a technician by an active FM of that site (which also links or creates the `technicians` row
-  used by dispatch); an FM by an admin of that site. The very first FM of a site is approved by the
-  database operator. Nobody approves their own request.
+- **Users and technicians join freely; only FMs are approved.** Anyone with the site's code can
+  sign up as `USER` or `TECHNICIAN`, active at once: nobody confirms them. A technician account is
+  linked to the `technicians` row with the same email (keeping its skills) or gets a new row with no
+  skills, which dispatch never selects until skills are set (Q17). `FM` can authorize work and close
+  tickets, so it stays `PENDING` until the operator approves it (`backend/deploy/Approve-CbmFm.ps1`);
+  the person can log in meanwhile and sees "waiting for approval". Nobody approves their own
+  request.
 
 ---
 
@@ -362,6 +364,9 @@ without changing screen.
   `ticket_counts`, `technician_workload`). Values come from the same read-only queries the agent
   uses, so the dashboard and the chat can never quote different numbers.
 - **F-4** Data refreshes on open, on pull-to-refresh, and when a notification arrives.
+- **F-4a** **"First job" tag.** Wherever the FM sees a technician (offers, tickets, workload), a
+  technician with no completed job carries a small blinking **first job** tag, smaller than the
+  main text, like a notification LED, so a newcomer is noticed before work is authorized.
 
 **Chat (bottom half)**
 
@@ -527,7 +532,7 @@ and its access code existed).
 | Session ≤ 1 hour, never extended | `CHECK (expires_at <= created_at + 1 h)`; `authenticate()` never updates `expires_at` |
 | Tokens never stored | only `SHA-256(token)`; the token is returned once, at login |
 | Passwords | bcrypt cost 12 (`pgcrypto`), in a separate table |
-| Self-chosen role is only a request | `sign_up()`: `USER` active, others `PENDING`; `ADMIN` not selectable |
+| Only FM is a request | `sign_up()`: `USER` and `TECHNICIAN` active, `FM` `PENDING`; `ADMIN` not selectable |
 | Active technician ⇒ linked `technicians` row, one account per row | `CHECK` + partial unique index |
 | Frame invariant of the capture (K, image, tap in one coordinate system) | `CHECK`s on `report_photos` |
 | Reporter sees and writes only own reports, only in the session's site | `claim_capture()`, `attach_capture()`, `reporter_reports()` |
@@ -621,6 +626,7 @@ unfinished app phase.
 | Q14 | ~~How do the workflows notice new app rows?~~ **Decided 19 Sep** | `NOTIFY cbm_app_capture` received by a Postgres Trigger in WF1, plus a sweep on the existing one-minute tick. Built for captures; WF1's app branch joins the Drive branch at `Capture Input` (`backend/n8n/README.md`) |
 | Q15 | ~~Where are capture images stored?~~ **Decided 19 Sep** | On the App API's own volume; WF1 fetches them from the internal image service (`cbm-app-internal:8081`, not published). The Drive branch stays until it is deleted |
 | Q16 | ~~How does the phone reach the API over HTTPS?~~ **Decided 19 Sep** | The existing ngrok domain. A Caddy proxy (`edge`) in the workflow stack sends `/v1/*` to the App API and everything else to n8n, as before; n8n never depends on the app being up |
+| Q17 | Where does a self-registered technician's skill list come from? | Dispatch offers a job only to technicians whose `skills` contain the job's required skill. Options: a one-time "What do you work on?" step after sign-up · the FM sets it · both |
 
 ---
 

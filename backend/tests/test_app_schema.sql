@@ -75,28 +75,30 @@ DO $$ DECLARE r jsonb; i int; BEGIN
  ASSERT cbm_app.authenticate(pg_temp.get('reporter'),ARRAY['USER']) IS NOT NULL, 'other sessions unaffected';
 END $$;
 
--- 5. TECHNICIAN and FM are requests; approvals follow the hierarchy --------------------------------
-DO $$ DECLARE r jsonb; fm jsonb; tech jsonb; BEGIN
- fm := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','FM','email','fm@example.com','password','long-enough-1','device',pg_temp.dev(3)));
+-- 5. USER and TECHNICIAN are open roles; only FM waits for the operator --------------------------------
+INSERT INTO public.technicians(full_name,email,skills) VALUES ('Existing Tech','Existing.Tech@example.com','{doors,locks}');
+DO $$ DECLARE r jsonb; fm jsonb; tech jsonb; tid int; BEGIN
  tech := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','TECHNICIAN','email','tech@example.com','password','long-enough-1','display_name','Tina Tech','device',pg_temp.dev(4)));
- ASSERT fm#>>'{memberships,0,status}'='PENDING' AND tech#>>'{memberships,0,status}'='PENDING', 'self-declared roles are pending';
- ASSERT cbm_app.authenticate(fm->>'token',ARRAY['FM']) IS NULL AND cbm_app.authenticate(tech->>'token',ARRAY['TECHNICIAN']) IS NULL, 'pending roles grant nothing';
- ASSERT cbm_app.me(tech->>'token')#>>'{membership,status}'='PENDING', 'me() shows the pending state';
- -- Bootstrap: the first FM is approved by the database operator.
+ ASSERT tech#>>'{memberships,0,status}'='ACTIVE', 'technician is active at sign-up: '||tech;
+ tid := (tech#>>'{memberships,0,technician_id}')::int;
+ ASSERT (cbm_app.authenticate(tech->>'token',ARRAY['TECHNICIAN'])->>'technician_id')::int=tid, 'technician gate carries technician_id';
+ ASSERT (SELECT full_name='Tina Tech' AND email='tech@example.com' AND skills='{}' AND active FROM public.technicians WHERE id=tid),
+  'a new technician row with no skills (dispatch never selects it until skills are set)';
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','TECHNICIAN','email','existing.tech@example.com','password','long-enough-1','device',pg_temp.dev(8)));
+ tid := (r#>>'{memberships,0,technician_id}')::int;
+ ASSERT (SELECT email='Existing.Tech@example.com' AND skills='{doors,locks}' FROM public.technicians WHERE id=tid), 'existing technician linked by email, skills kept';
+ ASSERT (SELECT count(*) FROM public.technicians WHERE lower(email)='existing.tech@example.com')=1, 'no duplicate technician row';
+ fm := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','FM','email','fm@example.com','password','long-enough-1','device',pg_temp.dev(3)));
+ ASSERT fm#>>'{memberships,0,status}'='PENDING', 'FM is a request';
+ ASSERT cbm_app.authenticate(fm->>'token',ARRAY['FM']) IS NULL, 'a pending FM grants nothing';
+ ASSERT cbm_app.me(fm->>'token')#>>'{membership,status}'='PENDING', 'me() shows the pending state';
+ ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',fm->>'membership_id','decision','APPROVE','decider_token',tech->>'token'))->>'status'='FORBIDDEN', 'a technician cannot approve an FM';
  ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',fm->>'membership_id','decision','APPROVE','operator',true))->>'status'='APPROVED', 'operator approves FM';
  ASSERT cbm_app.authenticate(fm->>'token',ARRAY['FM'])->>'role'='FM', 'approval takes effect in the open session';
- -- An FM cannot approve another FM.
  r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','FM','email','fm2@example.com','password','long-enough-1','device',pg_temp.dev(5)));
  ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',r->>'membership_id','decision','APPROVE','decider_token',fm->>'token'))->>'status'='FORBIDDEN', 'FM cannot approve FM';
  ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',r->>'membership_id','decision','REJECT','operator',true))->>'status'='REASON_REQUIRED', 'rejection needs a reason';
- -- A USER cannot approve anything.
- ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',tech->>'membership_id','decision','APPROVE','decider_token',pg_temp.get('reporter')))->>'status'='FORBIDDEN', 'USER cannot approve';
- -- The FM approves the technician; a technicians row is created from the given skills.
- ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',tech->>'membership_id','decision','APPROVE','decider_token',fm->>'token'))->>'status'='SKILLS_REQUIRED', 'new technician needs skills';
- r := cbm_app.decide_membership(jsonb_build_object('membership_id',tech->>'membership_id','decision','APPROVE','decider_token',fm->>'token','technician',jsonb_build_object('skills',jsonb_build_array('doors','locks'))));
- ASSERT r->>'status'='APPROVED' AND (SELECT full_name FROM technicians WHERE id=(r->>'technician_id')::int)='Tina Tech', 'technician approved and linked: '||r;
- ASSERT (cbm_app.authenticate(tech->>'token',ARRAY['TECHNICIAN'])->>'technician_id')::int=(r->>'technician_id')::int, 'technician gate carries technician_id';
- ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',tech->>'membership_id','decision','REJECT','reason','x','decider_token',fm->>'token'))->>'status'='ALREADY_DECIDED', 'decisions are final';
+ ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',fm->>'membership_id','decision','REJECT','reason','x','operator',true))->>'status'='ALREADY_DECIDED', 'decisions are final';
  PERFORM pg_temp.put('tech',tech->>'token'); PERFORM pg_temp.put('fm',fm->>'token');
 END $$;
 

@@ -17,7 +17,7 @@ run on top of the same PostgreSQL database (schema `public`) and never receive c
 | `migrations/002_api_role.sql` | The API's login `cbm_app_api`: no table privileges, `EXECUTE` on the entry functions only. |
 | `cbm_api/` | FastAPI service: HTTP, Google token verification, rate and size limits. |
 | `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`), `run-tests.sh`. |
-| `deploy/` | `Install-CbmApp.ps1` and `docker-compose.app.yml`. |
+| `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, and `Approve-CbmFm.ps1` (list, approve or reject FM requests). |
 | `n8n/` | The WF1 app branch: patch script and tests. |
 
 ## Where the rules live
@@ -42,7 +42,7 @@ the database-operator path of `decide_membership`. `tests/test_app_schema.sql` a
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/healthz` | — | Database reachable |
-| POST | `/v1/auth/signup` | site code | Email + password + role. `USER` active at once; `TECHNICIAN`/`FM` pending |
+| POST | `/v1/auth/signup` | site code | Email + password + role. `USER` and `TECHNICIAN` active at once (a technician is linked to dispatch); `FM` pending until the operator approves it |
 | POST | `/v1/auth/signup/google` | site code | Google ID token + role |
 | POST | `/v1/auth/login` | — | Email + password → one-hour session |
 | POST | `/v1/auth/login/google` | — | Google ID token → one-hour session |
