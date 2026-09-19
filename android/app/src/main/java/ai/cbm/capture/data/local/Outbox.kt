@@ -9,6 +9,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -38,6 +40,10 @@ enum class OutboxStatus {
 data class OutboxEntity(
     /** Also the server's idempotency key, which is what makes blind retries safe. */
     @PrimaryKey @ColumnInfo(name = "capture_id") val captureId: String,
+    /** The account that took the photo. Only that account's session ever sends it. */
+    @ColumnInfo(name = "account_id", defaultValue = "") val accountId: String,
+    /** Groups a report's photos: the first one and any replacement the workflows ask for. */
+    @ColumnInfo(name = "report_id", defaultValue = "") val reportId: String,
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "building_id") val buildingId: String,
     val summary: String,
@@ -66,11 +72,11 @@ interface OutboxDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: OutboxEntity)
 
-    @Query("SELECT * FROM outbox ORDER BY created_at DESC")
-    fun observeAll(): Flow<List<OutboxEntity>>
+    @Query("SELECT * FROM outbox WHERE account_id = :accountId ORDER BY created_at DESC")
+    fun observeForAccount(accountId: String): Flow<List<OutboxEntity>>
 
-    @Query("SELECT COUNT(*) FROM outbox WHERE status = 'QUEUED'")
-    fun observePendingCount(): Flow<Int>
+    @Query("SELECT COUNT(*) FROM outbox WHERE status = 'QUEUED' AND account_id = :accountId")
+    fun observePendingCount(accountId: String): Flow<Int>
 
     @Query("SELECT * FROM outbox WHERE capture_id = :captureId")
     suspend fun find(captureId: String): OutboxEntity?
@@ -80,17 +86,17 @@ interface OutboxDao {
      * cannot pick up the same row.
      */
     @androidx.room.Transaction
-    suspend fun claimNextDue(now: Long): OutboxEntity? {
-        val candidate = nextDue(now) ?: return null
+    suspend fun claimNextDue(now: Long, accountId: String): OutboxEntity? {
+        val candidate = nextDue(now, accountId) ?: return null
         setStatus(candidate.captureId, OutboxStatus.UPLOADING, now, candidate.attemptCount + 1)
         return candidate.copy(status = OutboxStatus.UPLOADING, attemptCount = candidate.attemptCount + 1)
     }
 
     @Query(
-        "SELECT * FROM outbox WHERE status = 'QUEUED' AND next_attempt_at <= :now " +
+        "SELECT * FROM outbox WHERE status = 'QUEUED' AND next_attempt_at <= :now AND account_id = :accountId " +
             "ORDER BY created_at ASC LIMIT 1"
     )
-    suspend fun nextDue(now: Long): OutboxEntity?
+    suspend fun nextDue(now: Long, accountId: String): OutboxEntity?
 
     @Query(
         "UPDATE outbox SET status = :status, next_attempt_at = :nextAttemptAt, " +
@@ -99,10 +105,10 @@ interface OutboxDao {
     suspend fun setStatus(captureId: String, status: OutboxStatus, nextAttemptAt: Long, attemptCount: Int)
 
     @Query(
-        "UPDATE outbox SET status = 'DELIVERED', server_request_id = :requestId, " +
-            "server_status = :serverStatus, last_error = NULL WHERE capture_id = :captureId"
+        "UPDATE outbox SET status = 'DELIVERED', server_status = :serverStatus, last_error = NULL " +
+            "WHERE capture_id = :captureId"
     )
-    suspend fun markDelivered(captureId: String, requestId: String?, serverStatus: String?)
+    suspend fun markDelivered(captureId: String, serverStatus: String?)
 
     @Query("UPDATE outbox SET status = 'REJECTED', last_error = :reason WHERE capture_id = :captureId")
     suspend fun markRejected(captureId: String, reason: String)
@@ -130,7 +136,25 @@ interface OutboxDao {
     suspend fun all(): List<OutboxEntity>
 }
 
-@Database(entities = [OutboxEntity::class], version = 1, exportSchema = true)
+@Database(entities = [OutboxEntity::class], version = 2, exportSchema = false)
 abstract class CbmDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
+
+    companion object {
+        /**
+         * 1 -> 2: photos now belong to an account and a report. A photo queued by version 1 has
+         * neither, and sending it under whoever logs in next would misattribute it, so it is marked
+         * not accepted with a request to take it again. Delivered history is kept.
+         */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE outbox ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE outbox ADD COLUMN report_id TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    "UPDATE outbox SET status = 'REJECTED', last_error = 'Saved before accounts existed. " +
+                        "Please take the photo again.' WHERE status IN ('QUEUED', 'UPLOADING')"
+                )
+            }
+        }
+    }
 }

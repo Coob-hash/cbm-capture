@@ -46,8 +46,8 @@ class CaptureAssembler(
 
     data class Input(
         val captureId: UUID,
+        val reportId: String,
         val buildingId: String,
-        val reporterEmail: String?,
         val description: String?,
         val capturedAt: Instant,
         val turn: QuarterTurn
@@ -77,8 +77,8 @@ class CaptureAssembler(
 
         val metadata = CaptureMetadata(
             captureId = input.captureId.toString(),
+            reportId = input.reportId,
             buildingId = input.buildingId,
-            reporterEmail = input.reporterEmail,
             description = input.description,
             capturedAt = DateTimeFormatter.ISO_INSTANT.format(input.capturedAt),
             client = client,

@@ -4,14 +4,16 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * Wire types for `POST /cbm/capture`, mirroring `contract/capture-metadata.schema.json` and the
- * iOS `CaptureContract.swift` field for field.
+ * Wire types for `POST /v1/captures` (the App API), mirroring `contract/capture-metadata.schema.json`.
+ *
+ * 2.0.0: `report_id` groups a report's photos (the first one and any replacement the workflows ask
+ * for); `reporter_email` is gone - the server takes the reporter from the session.
  *
  * Inert data classes by design: the domain logic lives in [ai.cbm.capture.domain.imaging.ImageTransform]
  * and [ai.cbm.capture.domain.intrinsics.IntrinsicsGate], so a contract change is a diff in one file.
  */
 object CaptureContract {
-    const val SCHEMA_VERSION = "1.0.0"
+    const val SCHEMA_VERSION = "2.0.0"
 }
 
 @Serializable
@@ -35,8 +37,10 @@ enum class TrackingState { NORMAL, LIMITED, NOT_AVAILABLE }
 data class CaptureMetadata(
     @SerialName("schema_version") val schemaVersion: String = CaptureContract.SCHEMA_VERSION,
     @SerialName("capture_id") val captureId: String,
+    /** Same for every photo of one report; a new report gets a new one. */
+    @SerialName("report_id") val reportId: String,
+    /** The site of the session (cbm_app.sites.id); the server refuses any other. */
     @SerialName("building_id") val buildingId: String,
-    @SerialName("reporter_email") val reporterEmail: String? = null,
     val description: String? = null,
     /** RFC 3339, UTC, taken at shutter time - not at upload time. */
     @SerialName("captured_at") val capturedAt: String,
@@ -108,28 +112,3 @@ data class Vector3(val x: Double, val y: Double, val z: Double)
 
 @Serializable
 data class QuaternionValue(val x: Double, val y: Double, val z: Double, val w: Double)
-
-// MARK: - Responses
-
-@Serializable
-data class CaptureAcceptedResponse(
-    val ok: Boolean = true,
-    @SerialName("capture_id") val captureId: String? = null,
-    @SerialName("request_id") val requestId: String? = null,
-    val status: String? = null,
-    val duplicate: Boolean = false
-)
-
-@Serializable
-data class CaptureErrorResponse(
-    val ok: Boolean = false,
-    val error: String,
-    val detail: String? = null
-)
-
-@Serializable
-data class CaptureHealthResponse(
-    val ok: Boolean,
-    @SerialName("building_id") val buildingId: String? = null,
-    @SerialName("schema_version") val schemaVersion: String? = null
-)

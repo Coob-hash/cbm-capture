@@ -6,6 +6,7 @@ import ai.cbm.capture.data.local.OutboxEntity
 import ai.cbm.capture.data.local.OutboxStatus
 import ai.cbm.capture.data.remote.CaptureUploader
 import ai.cbm.capture.data.remote.UploadOutcome
+import ai.cbm.capture.data.session.Session
 import ai.cbm.capture.data.settings.SettingsRepository
 import ai.cbm.capture.domain.model.CaptureMetadata
 import ai.cbm.capture.domain.model.IntrinsicsSource
@@ -25,6 +26,7 @@ import kotlin.math.pow
 /** A snapshot of one outbox row, shaped for the UI. */
 data class ReportItem(
     val captureId: String,
+    val reportId: String,
     val createdAt: Long,
     val summary: String,
     val status: OutboxStatus,
@@ -51,10 +53,11 @@ class CaptureRepository @Inject constructor(
     private val json: Json
 ) {
 
-    fun observeReports(): Flow<List<ReportItem>> =
-        dao.observeAll().map { entities -> entities.map(::toReportItem) }
+    /** Photos on this phone taken by [accountId]; other people's are never shown. */
+    fun observeReports(accountId: String): Flow<List<ReportItem>> =
+        dao.observeForAccount(accountId).map { entities -> entities.map(::toReportItem) }
 
-    fun observePendingCount(): Flow<Int> = dao.observePendingCount()
+    fun observePendingCount(accountId: String): Flow<Int> = dao.observePendingCount(accountId)
 
     // ---- Enqueue ----
 
@@ -63,7 +66,7 @@ class CaptureRepository @Inject constructor(
      * the two leaves an orphan file (swept by [pruneOrphans]) rather than a row pointing at
      * nothing.
      */
-    suspend fun enqueue(pkg: CaptureAssembler.Package): ReportItem = withContext(Dispatchers.IO) {
+    suspend fun enqueue(pkg: CaptureAssembler.Package, accountId: String): ReportItem = withContext(Dispatchers.IO) {
         val captureId = pkg.metadata.captureId
         val imageFile = imageFile(captureId)
         imageFile.parentFile?.mkdirs()
@@ -75,6 +78,8 @@ class CaptureRepository @Inject constructor(
 
         val entity = OutboxEntity(
             captureId = captureId,
+            accountId = accountId,
+            reportId = pkg.metadata.reportId,
             createdAt = System.currentTimeMillis(),
             buildingId = pkg.metadata.buildingId,
             summary = pkg.metadata.description?.takeIf { it.isNotBlank() } ?: "Untitled report",
@@ -97,11 +102,13 @@ class CaptureRepository @Inject constructor(
      * of them slower and more likely to time out, and the queue is measured in units, not
      * thousands. Returns false when a transient failure means the caller should back off.
      */
-    suspend fun drain(): Boolean {
+    suspend fun drain(session: Session): Boolean {
         while (true) {
-            val claimed = dao.claimNextDue(System.currentTimeMillis()) ?: return true
+            if (!session.isValid()) return true
+            val claimed = dao.claimNextDue(System.currentTimeMillis(), session.accountId) ?: return true
 
             val outcome = uploader.upload(
+                token = session.token,
                 captureId = claimed.captureId,
                 metadataJson = claimed.metadataJson,
                 imageFile = File(claimed.imagePath)
@@ -109,7 +116,7 @@ class CaptureRepository @Inject constructor(
 
             when (outcome) {
                 is UploadOutcome.Delivered -> {
-                    dao.markDelivered(claimed.captureId, outcome.requestId, outcome.status)
+                    dao.markDelivered(claimed.captureId, outcome.status)
                     // The full-size JPEG has served its purpose; the thumbnail keeps the
                     // history browsable without holding megabytes per report.
                     File(claimed.imagePath).delete()
@@ -117,6 +124,12 @@ class CaptureRepository @Inject constructor(
 
                 is UploadOutcome.PermanentFailure ->
                     dao.markRejected(claimed.captureId, outcome.reason)
+
+                // The session ended while draining: back to the queue, sent after the next login.
+                UploadOutcome.NeedsLogin -> {
+                    dao.markRetryable(claimed.captureId, "Waiting for you to log in.", 0)
+                    return true
+                }
 
                 is UploadOutcome.TransientFailure -> {
                     dao.markRetryable(
@@ -169,6 +182,7 @@ class CaptureRepository @Inject constructor(
 
     private fun toReportItem(entity: OutboxEntity) = ReportItem(
         captureId = entity.captureId,
+        reportId = entity.reportId,
         createdAt = entity.createdAt,
         summary = entity.summary,
         status = entity.status,

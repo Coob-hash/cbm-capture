@@ -89,6 +89,16 @@ cd android
 
 To remove every toolchain again, delete `C:\Users\USER\toolchains`.
 
+**The API address is a build setting**, kept out of Git. Put it in `android/local.properties`:
+
+```properties
+cbm.apiBaseUrl=https://<your-ngrok-domain>/
+```
+
+Without it the app builds against `https://example.invalid/` and cannot log in. A site's QR code
+carries `cbmapp://join?site=<site code>`: the phone's camera app opens it in the installed app, on
+the sign-up screen for that site.
+
 An **ARCore-supported physical device** is needed for the primary capture path; the
 Camera2/EXIF fallback works on others. The standard emulator is not useful here — its virtual
 camera does not produce meaningful intrinsics.

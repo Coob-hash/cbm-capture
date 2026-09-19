@@ -58,15 +58,14 @@ import com.google.ar.core.Session
  */
 @Composable
 fun CaptureScreen(
-    onOpenReports: () -> Unit,
-    onOpenSettings: () -> Unit,
+    /** Back to the reporter's home; also called once a photo is saved. */
+    onDone: () -> Unit,
     viewModel: CaptureViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val activity = context as Activity
 
     val phase by viewModel.phase.collectAsStateWithLifecycle()
-    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val pendingCount by viewModel.pendingCount.collectAsStateWithLifecycle()
     val trackingState by viewModel.trackingState.collectAsStateWithLifecycle()
     val trackingAdvice by viewModel.trackingAdvice.collectAsStateWithLifecycle()
@@ -104,7 +103,7 @@ fun CaptureScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 CalibrationBadge(trackingState)
                 BadgedBox(badge = { if (pendingCount > 0) Badge { Text("$pendingCount") } }) {
-                    FilledTonalButton(onClick = onOpenReports) {
+                    FilledTonalButton(onClick = onDone) {
                         Icon(Icons.Default.Inbox, contentDescription = null, Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
                         Text("My reports")
@@ -114,9 +113,9 @@ fun CaptureScreen(
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 when {
-                    !settings.isConfigured -> SetupPrompt(onOpenSettings)
                     trackingAdvice != null -> InstructionCard(trackingAdvice!!, isWarning = true)
                     phase is CaptureViewModel.Phase.Processing -> InstructionCard("Preparing the photo...")
+                    viewModel.isReplacement -> InstructionCard("Another photo of the same problem: tap the damaged part")
                     else -> InstructionCard("Tap the damaged part")
                 }
                 toast?.let { message ->
@@ -137,7 +136,10 @@ fun CaptureScreen(
             onDescriptionChange = viewModel::updateDescription,
             onDiscard = viewModel::discard,
             onSend = {
-                viewModel.send { allowMetered -> UploadWorker.enqueue(activity, allowMetered) }
+                viewModel.send { allowMetered ->
+                    UploadWorker.enqueue(activity, allowMetered)
+                    onDone()
+                }
             }
         )
     }
@@ -240,20 +242,6 @@ private fun CalibrationBadge(state: TrackingState) {
     }
     Surface(shape = CircleShape, tonalElevation = 3.dp) {
         Text(text, Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
-    }
-}
-
-@Composable
-private fun SetupPrompt(onOpenSettings: () -> Unit) {
-    Surface(shape = MaterialTheme.shapes.large, tonalElevation = 3.dp) {
-        Column(
-            Modifier.padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("This phone is not set up yet", style = MaterialTheme.typography.titleMedium)
-            Button(onClick = onOpenSettings) { Text("Open Settings") }
-        }
     }
 }
 

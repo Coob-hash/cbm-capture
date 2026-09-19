@@ -1,5 +1,6 @@
 package ai.cbm.capture.work
 
+import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.repository.CaptureRepository
 import android.content.Context
 import androidx.hilt.work.HiltWorker
@@ -26,12 +27,16 @@ import dagger.assisted.AssistedInject
 class UploadWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted params: WorkerParameters,
-    private val repository: CaptureRepository
+    private val repository: CaptureRepository,
+    private val sessions: SessionStore
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
         repository.resetStuckUploads()
-        return if (repository.drain()) Result.success() else Result.retry()
+        // Photos go out only under their owner's valid session; without one, they wait for the
+        // next login, which enqueues this worker again.
+        val session = sessions.current() ?: return Result.success()
+        return if (repository.drain(session)) Result.success() else Result.retry()
     }
 
     companion object {

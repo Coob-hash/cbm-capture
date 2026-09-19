@@ -2,8 +2,7 @@ package ai.cbm.capture.ui.capture
 
 import ai.cbm.capture.data.capture.ArCameraController
 import ai.cbm.capture.data.capture.CaptureAssembler
-import ai.cbm.capture.data.settings.AppSettings
-import ai.cbm.capture.data.settings.SettingsRepository
+import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.imaging.ImageTransform
 import ai.cbm.capture.domain.imaging.QuarterTurn
 import ai.cbm.capture.domain.model.IntrinsicsSource
@@ -11,6 +10,7 @@ import ai.cbm.capture.domain.model.TrackingState
 import ai.cbm.capture.domain.repository.CaptureRepository
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.ar.core.Session
@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,8 +41,16 @@ import javax.inject.Inject
 class CaptureViewModel @Inject constructor(
     private val repository: CaptureRepository,
     private val assembler: CaptureAssembler,
-    settingsRepository: SettingsRepository
+    private val sessions: SessionStore,
+    savedState: SavedStateHandle
 ) : ViewModel() {
+
+    /**
+     * The report this camera session adds a photo to: an existing one when the workflows asked for
+     * a replacement (navigation argument), otherwise a new one, created here once.
+     */
+    val reportId: String = savedState.get<String>(REPORT_ID_ARG)?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+    val isReplacement: Boolean = !savedState.get<String>(REPORT_ID_ARG).isNullOrBlank()
 
     sealed interface Phase {
         data object Aiming : Phase
@@ -76,11 +85,8 @@ class CaptureViewModel @Inject constructor(
     val trackingState: StateFlow<TrackingState> = controller.trackingState
     val trackingAdvice: StateFlow<String?> = controller.trackingAdvice
 
-    val pendingCount: StateFlow<Int> = repository.observePendingCount()
+    val pendingCount: StateFlow<Int> = (sessions.current()?.let { repository.observePendingCount(it.accountId) } ?: flowOf(0))
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-
-    val settings: StateFlow<AppSettings> = settingsRepository.settings
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
 
     /** Held outside [Phase] because it carries the JPEG bytes. */
     private var stagedPackage: CaptureAssembler.Package? = null
@@ -100,8 +106,12 @@ class CaptureViewModel @Inject constructor(
      */
     fun onTap(normalizedX: Float, normalizedY: Float, surfaceRotation: Int) {
         if (_phase.value !is Phase.Aiming) return
-        val current = settings.value
-        if (!current.isConfigured) return
+        val session = sessions.current()
+        val siteId = session?.membership?.siteId
+        if (session == null || siteId == null) {
+            _phase.value = Phase.Failed("Your session has ended. Log in again to report.")
+            return
+        }
 
         _phase.value = Phase.Processing
         viewModelScope.launch {
@@ -113,8 +123,8 @@ class CaptureViewModel @Inject constructor(
 
             val input = CaptureAssembler.Input(
                 captureId = UUID.randomUUID(),
-                buildingId = current.buildingId,
-                reporterEmail = current.reporterEmail.ifBlank { null },
+                reportId = reportId,
+                buildingId = siteId,
                 description = null,
                 capturedAt = Instant.now(),
                 turn = QuarterTurn.forDisplayRotation(surfaceRotation)
@@ -182,6 +192,10 @@ class CaptureViewModel @Inject constructor(
     fun send(onQueued: (allowMetered: Boolean) -> Unit) {
         val reviewing = _phase.value as? Phase.Reviewing ?: return
         val staged = stagedPackage ?: return
+        val session = sessions.current() ?: run {
+            _phase.value = Phase.Failed("Your session has ended. Log in again, then take the photo again.")
+            return
+        }
 
         val description = reviewing.description.trim().ifBlank { null }
         val pkg = CaptureAssembler.Package(
@@ -192,7 +206,7 @@ class CaptureViewModel @Inject constructor(
 
         _phase.value = Phase.Processing
         viewModelScope.launch {
-            runCatching { repository.enqueue(pkg) }
+            runCatching { repository.enqueue(pkg, session.accountId) }
                 .onSuccess {
                     stagedPackage = null
                     _toast.value = "Report saved. It will upload automatically."
@@ -203,5 +217,9 @@ class CaptureViewModel @Inject constructor(
                     _phase.value = Phase.Failed("Could not save the report: ${error.message}")
                 }
         }
+    }
+
+    companion object {
+        const val REPORT_ID_ARG = "reportId"
     }
 }

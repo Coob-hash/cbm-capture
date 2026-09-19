@@ -555,7 +555,7 @@ so an iOS target can be added later without restructuring (Q5).
 | Phase | Reporter | Technician | FM |
 |---|---|---|---|
 | **0 — structure** | move the Android code into KMP modules; no behaviour change, the 16 tests still pass | | |
-| **1 — identity** | QR → sign-up/login; capture via webhook into current WF1; status list | sign-up, "waiting for approval" | sign-up, approve technicians |
+| **1 — identity** | ✅ built (Android): join by QR link or code, sign-up, login, one-hour sessions, My reports, Open a report → `/v1/captures` → WF1; not yet tried on a phone | sign-up, "waiting for approval" ✅ | sign-up ✅; approving technicians still by SQL |
 | **2 — technician** | notifications | offers, accept/decline, in-app report, dashboard | — |
 | **3 — FM** | — | — | split dashboard + chat, confirmation cards |
 | **4 — email off** | email fallback disabled per account once the app is confirmed on their device | same | same (weekly report stays email) |
@@ -617,10 +617,10 @@ unfinished app phase.
 | Q10 | Should the FM have direct approve/reject buttons on the dashboard, or only via the chat? | chat-only with confirmation cards (current proposal) · buttons calling the same guarded helper |
 | Q11 | Queued reports after the hour expires | wait for the next login (current rule) · a narrow upload-only credential issued at login, valid e.g. 24 h, usable only to deliver captures already in that account's outbox |
 | Q12 | Several FMs and several places (to be discussed) | tickets scoped by site; which FM receives an authorization request; whether an FM can see more than one site; who is the site's admin |
-| Q13 | Distribution before the Play Store | Play Console internal-testing track (the QR still works through the store) · direct APK download, where the QR carries the site code as a deep link instead |
+| Q13 | Distribution before the Play Store | For now: the QR code carries `cbmapp://join?site=<code>`, which the phone's camera opens in the installed app (APK sideloaded). Play Console internal testing, with the site code passed through the Play Install Referrer, remains open |
 | Q14 | ~~How do the workflows notice new app rows?~~ **Decided 19 Sep** | `NOTIFY cbm_app_capture` received by a Postgres Trigger in WF1, plus a sweep on the existing one-minute tick. Built for captures; WF1's app branch joins the Drive branch at `Capture Input` (`backend/n8n/README.md`) |
 | Q15 | ~~Where are capture images stored?~~ **Decided 19 Sep** | On the App API's own volume; WF1 fetches them from the internal image service (`cbm-app-internal:8081`, not published). The Drive branch stays until it is deleted |
-| Q16 | How does the phone reach the API over HTTPS? | a reverse proxy on the existing ngrok domain in front of n8n and the API · a second tunnel/domain for the API. Until then: LAN testing with test accounts only |
+| Q16 | ~~How does the phone reach the API over HTTPS?~~ **Decided 19 Sep** | The existing ngrok domain. A Caddy proxy (`edge`) in the workflow stack sends `/v1/*` to the App API and everything else to n8n, as before; n8n never depends on the app being up |
 
 ---
 
