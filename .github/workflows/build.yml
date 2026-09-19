@@ -1,4 +1,4 @@
-# Builds and tests both apps.
+# Builds and tests the apps and the backend.
 #
 # This file must sit at the ROOT of the git repository to be picked up. If this folder is
 # nested inside a larger repo, move .github/ to the repo root and adjust the `working-directory`
@@ -38,7 +38,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Unit tests
-        run: ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+        run: ./gradlew testDebugUnitTest --no-daemon --console=plain
 
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug --no-daemon --console=plain
@@ -54,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-test-report
-          path: android/app/build/reports/tests/testDebugUnitTest
+          path: android/*/build/reports/tests/testDebugUnitTest
 
   ios:
     name: iOS — build and test
@@ -143,60 +143,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcbeautify
 
-  server:
-    name: Server — migration, workflows, Code nodes
+  backend:
+    name: Backend — schema, API, access rules
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: cbm
-          POSTGRES_PASSWORD: cbm
-          POSTGRES_DB: cbm_ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      PGPASSWORD: cbm
-      PSQL: psql -v ON_ERROR_STOP=1 -h localhost -U cbm -d cbm_ci
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      # Applied to the real release-2026_07_13 schema, not a hand-made fixture, so a migration
-      # that only works against an imagined table shape fails here.
-      - name: Apply base schema and migration
-        working-directory: server/sql
-        run: |
-          $PSQL -q -f 000_base_schema.reference.sql
-          $PSQL -q -f 001_add_camera_intrinsics.sql
-          echo "--- re-applying to prove idempotency ---"
-          $PSQL -q -f 001_add_camera_intrinsics.sql
-
-      - name: Constraint tests
-        working-directory: server/sql
-        run: $PSQL -f tests/constraints_test.sql
-
-      - name: Staging query test
-        working-directory: server/sql
-        run: $PSQL -f tests/staging_test.sql
-
-      - name: Workflows are structurally sound
-        working-directory: server/n8n
-        run: python validate_workflows.py WF1_Capture_Intake.json WF2_EOD_AI_Agent_and_FM_Approval.json
-
-      - name: Code node behaviour
-        working-directory: server/n8n
-        run: node test_code_nodes.mjs
+      # A throwaway PostgreSQL 16 with the workflows' reference schema, every app migration applied
+      # twice, the SQL suite as owner, then the API suites in the API's own image connected as the
+      # restricted login cbm_app_api - the same script as on a workstation.
+      - name: SQL and API suites
+        run: bash backend/tests/run-tests.sh
 
   contract:
     name: Contract — schema and example agree
