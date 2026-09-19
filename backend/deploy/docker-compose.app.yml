@@ -1,0 +1,47 @@
+# CBM App API: its own Compose project, installed and updated only by Install-CbmApp.ps1. It joins
+# the workflows' network solely to reach cbm-postgres, and logs in there as cbm_app_api, which can
+# call the app's entry functions and nothing else. The workflow stack is never modified by it.
+name: cbm_app
+services:
+  api:
+    build:
+      context: ./backend
+      target: runtime        # the Dockerfile's last stage is the test image
+
+    image: cbm-app-api:1.0.0
+    restart: unless-stopped
+    environment:
+      CBM_APP_DATABASE_URL: postgresql://cbm_app_api:${CBM_APP_API_DB_PASSWORD:?Run Install-CbmApp.ps1}@cbm-postgres:5432/cbm_demo
+      CBM_APP_GOOGLE_CLIENT_IDS: ${CBM_APP_GOOGLE_CLIENT_IDS:-}
+      CBM_APP_TRUST_PROXY: ${CBM_APP_TRUST_PROXY:-0}
+    volumes:
+      - captures:/data/captures
+    ports:
+      # 127.0.0.1 by default. Set CBM_APP_BIND=0.0.0.0 in app.env to test from a phone on the same
+      # Wi-Fi; that is plain HTTP, so use test accounts only until HTTPS is in front of it.
+      - "${CBM_APP_BIND:-127.0.0.1}:8080:8080"
+    networks: [workflows]
+  # Serves stored capture images to WF1 (GET /internal/captures/{id}/image). No published port: it is
+  # reachable only on the workflows' network, as http://cbm-app-internal:8081, never from a phone.
+  api-internal:
+    image: cbm-app-api:1.0.0
+    depends_on: [api]
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "cbm_api.internal:app", "--host", "0.0.0.0", "--port", "8081",
+              "--no-proxy-headers", "--no-server-header"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - captures:/data/captures:ro
+    networks:
+      workflows:
+        aliases: [cbm-app-internal]
+volumes:
+  captures:
+networks:
+  workflows:
+    external: true
+    name: n8n_deploy_default

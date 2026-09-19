@@ -2,6 +2,7 @@
 android/.gradle/
 android/build/
 android/app/build/
+android/shared/build/
 android/.kotlin/
 # Machine-specific SDK path; each checkout regenerates it.
 android/local.properties
@@ -21,3 +22,7 @@ mock-server/__pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backend
+__pycache__/
+*.pyc

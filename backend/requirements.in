@@ -1,0 +1,9 @@
+# Top-level runtime dependencies. requirements.lock is generated from this file (see README) and
+# is what the image installs. Versions shared with the CBM Python services are kept identical.
+fastapi==0.141.1
+uvicorn==0.53.0
+psycopg[binary]==3.3.5
+psycopg-pool
+google-auth
+requests
+python-multipart
