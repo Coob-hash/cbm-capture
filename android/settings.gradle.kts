@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "CBM Capture"
-include(":app")
+include(":app", ":shared")

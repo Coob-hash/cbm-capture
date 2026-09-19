@@ -2,11 +2,11 @@ package ai.cbm.capture.domain.imaging
 
 import ai.cbm.capture.domain.intrinsics.IntrinsicsGate
 import ai.cbm.capture.domain.model.IntrinsicsSource
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.Test
 import kotlin.math.abs
 
 /**
@@ -72,8 +72,8 @@ class ImageTransformTest {
             var expected = before
             repeat(turn.turns) { expected = -expected.second to expected.first }
 
-            assertEquals("turn=$turn", expected.first, after.first, 1e-9)
-            assertEquals("turn=$turn", expected.second, after.second, 1e-9)
+            assertEquals(expected.first, after.first, 1e-9, "turn=$turn")
+            assertEquals(expected.second, after.second, 1e-9, "turn=$turn")
         }
     }
 
