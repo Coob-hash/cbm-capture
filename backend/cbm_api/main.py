@@ -149,9 +149,11 @@ limiter = _RateLimiter(settings.auth_requests_per_minute)
 
 def client_address(request: Request) -> str:
     if settings.trust_proxy:
+        # The last entry is the one ngrok added from the connection it accepted. Earlier entries
+        # come from the client and can be forged, so they must not key the rate limit.
         forwarded = request.headers.get("x-forwarded-for", "")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

@@ -8,7 +8,8 @@ from dataclasses import dataclass
 class Settings:
     database_url: str
     google_client_ids: frozenset[str]
-    # Behind a reverse proxy the socket peer is the proxy; only then trust X-Forwarded-For.
+    # Behind the edge proxy the socket peer is the proxy; then the client is the last
+    # X-Forwarded-For entry (added by ngrok).
     trust_proxy: bool
     auth_requests_per_minute: int
     max_body_bytes: int

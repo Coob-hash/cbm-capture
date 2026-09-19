@@ -13,14 +13,17 @@ services:
     environment:
       CBM_APP_DATABASE_URL: postgresql://cbm_app_api:${CBM_APP_API_DB_PASSWORD:?Run Install-CbmApp.ps1}@cbm-postgres:5432/cbm_demo
       CBM_APP_GOOGLE_CLIENT_IDS: ${CBM_APP_GOOGLE_CLIENT_IDS:-}
-      CBM_APP_TRUST_PROXY: ${CBM_APP_TRUST_PROXY:-0}
+      CBM_APP_TRUST_PROXY: ${CBM_APP_TRUST_PROXY:-1}
     volumes:
       - captures:/data/captures
     ports:
       # 127.0.0.1 by default. Set CBM_APP_BIND=0.0.0.0 in app.env to test from a phone on the same
       # Wi-Fi; that is plain HTTP, so use test accounts only until HTTPS is in front of it.
       - "${CBM_APP_BIND:-127.0.0.1}:8080:8080"
-    networks: [workflows]
+    networks:
+      workflows:
+        # The workflow stack's edge proxy routes https://<ngrok domain>/v1/* here.
+        aliases: [cbm-app-api]
   # Serves stored capture images to WF1 (GET /internal/captures/{id}/image). No published port: it is
   # reachable only on the workflows' network, as http://cbm-app-internal:8081, never from a phone.
   api-internal:

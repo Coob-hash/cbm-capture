@@ -59,7 +59,8 @@ if (-not (Test-Path -LiteralPath $envPath)) {
         'CBM_APP_GOOGLE_CLIENT_IDS='
         '# 127.0.0.1 = this PC only. 0.0.0.0 = reachable from the LAN (plain HTTP).'
         'CBM_APP_BIND=127.0.0.1'
-        'CBM_APP_TRUST_PROXY=0'
+        '# 1 = requests arrive through the edge proxy; take the client from X-Forwarded-For.'
+        'CBM_APP_TRUST_PROXY=1'
     )
     [IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
 }

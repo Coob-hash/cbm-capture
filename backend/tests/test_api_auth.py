@@ -149,3 +149,12 @@ def test_the_api_login_cannot_read_tables():
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
             conn.rollback()
+
+
+def test_forwarded_client_is_the_entry_ngrok_added(monkeypatch):
+    from starlette.requests import Request
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, trust_proxy=True))
+    req = Request({"type": "http", "headers": [(b"x-forwarded-for", b"6.6.6.6, 203.0.113.9")], "client": ("172.18.0.5", 1)})
+    assert main.client_address(req) == "203.0.113.9"
+    monkeypatch.setattr(main, "settings", dataclasses.replace(main.settings, trust_proxy=False))
+    assert main.client_address(req) == "172.18.0.5"

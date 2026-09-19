@@ -73,6 +73,13 @@ applies every migration twice (they must be repeatable), and then runs:
 It never touches the deployment. The reference schema is a structure-only dump of the live
 workflow schema; refresh it when the workflows' SQL changes.
 
+```bash
+backend/tests/run-app-contract.sh     # the Android app's client code against a throwaway API
+```
+
+This one runs the app's own Retrofit client, uploader and capture contract against a real API on a
+local port: sign-up, photo upload, replay, report list, login, log-out.
+
 ## Install or update on the deployment
 
 ```powershell
@@ -90,6 +97,13 @@ It never writes workflow exports or workflow SQL. Before migrating, it dumps the
 joined to `n8n_deploy_default` only to reach `cbm-postgres`. It listens on `127.0.0.1:8080`. To
 test from a phone on the same Wi-Fi, set `CBM_APP_BIND=0.0.0.0` in `app.env`; that is plain
 HTTP, so use test accounts only until HTTPS is in front of it.
+
+**HTTPS.** Phones reach the API at `https://<ngrok domain>/v1/…`. The workflow stack's `edge` proxy
+(Caddy, `edge/Caddyfile` in the workflow release) receives ngrok's traffic. It sends `/v1/*` to this
+API (network alias `cbm-app-api`) and everything else to n8n, as before. If the app is down, only
+`/v1/*` fails, with `503 APP_UNAVAILABLE`. `CBM_APP_TRUST_PROXY=1` makes the rate limit key on the
+client address ngrok observed, which is the **last** `X-Forwarded-For` entry. Earlier entries can
+be forged by the client.
 
 `app.env` also holds `CBM_APP_GOOGLE_CLIENT_IDS`. It stays empty until a Google OAuth client
 exists; while empty, the Google endpoints answer `503 GOOGLE_NOT_CONFIGURED`.
