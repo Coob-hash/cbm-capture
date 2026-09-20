@@ -2,11 +2,17 @@
 
 **Product:** CBM App, the single mobile front end of the Community-Based Maintenance pipeline, with n8n as its backend
 **Version:** 2.0 (draft for discussion)
-**Date:** 19 September 2026
+**Date:** 20 September 2026
 **Status:** Requirements rewritten for role-based access. Decided 19 Sep 2026: authentication (Q1),
-Android-first on Kotlin Multiplatform (Q5), roles per site (Q6), self sign-up (Q8) — see § 14.
-Decided the same day: a dedicated App API over a shared database (Q2; Q3 falls away). Implemented and
-running: schema `cbm_app` and the API's account endpoints (`backend/`). Other details still open.
+Android-first on Kotlin Multiplatform (Q5), roles per site (Q6), self sign-up (Q8), a dedicated App
+API over a shared database (Q2; Q3 falls away) — see § 14. Decided 20 Sep 2026: users and technicians
+join freely and only FMs are approved; the FM decides from the card *and* from the chat (Q10); every
+active FM of a site sees that site's queue (Q12, in part); a technician sets their own skills (Q17).
+**Live on the deployment:** schema `cbm_app`, the account endpoints, the reporter's capture, and —
+since 20 Sep — the FM's two decisions and the technician's offers, jobs and skills (`backend/`).
+**Not built yet:** the technician and FM screens. Other details still open.
+**Screens under review:** an interactive prototype of the FM, technician and reporter screens exists
+(canvas shared with the team, deliberately not linked from this public repository).
 **Supersedes:** PRD 1.0 of 27 August 2026 as the product definition. PRD 1.0 is kept, unchanged, as
 [`docs/PRD_v1_capture.md`](docs/PRD_v1_capture.md): its capture, intrinsics, queue and wire-contract
 requirements remain **normative** for the reporter's capture flow and are referenced, not repeated, here.
@@ -275,6 +281,15 @@ three sections of one app.
 
 ### 6.2 Requirements
 
+**First run — what do you work on? (Q17)**
+
+- **T-0** Right after a technician's first sign-in, one screen asks which trades they work in, from
+  the five words triage produces (`plumbing`, `electrical`, `hvac`, `carpentry`, `general`), at least
+  one. It writes their own `technicians.skills` (`POST /v1/technician/skills`), which is what
+  dispatch matches; until it is answered they receive no offers, and the job list says so. They can
+  change it later in their profile. **Nobody else edits another person's skills** — not the FM;
+  only an administrator, in the database, and normally nobody does.
+
 **Offers — notification of new proposed jobs**
 
 - **T-1** When the dispatch agent reserves an offer for this technician, the app shows a push
@@ -486,6 +501,16 @@ keep deciding what a decision means and carrying it out — an authorization is 
 WF1 dispatches; a completion decision is recorded and WF2's one-minute review loop performs the IFC
 write, the closure and the notices. The app never writes a ticket's status itself.
 
+This costs **two lines in the workflow release**, both additive, and nothing else:
+
+| Change | Where | Why |
+|---|---|---|
+| `FM_APP` accepted as an actor | `database/wf3/actions/schema.sql`, `cbm_wf3_begin_action()` | The decision arrives from an authenticated app session instead of the chat or a mail link; every other guard is untouched |
+| An `FM_APP` decision routes to `DECIDED` | `database/wf2/review-mail.sql`, `cbm_wf2_review_status()` | That router told "WF3 is carrying this out" from "nobody is". An app decision has no WF3 execution behind it, so without this WF2 would wait for a workflow that never ran and, after ten minutes, email the FM *closure needs attention* while the ticket stayed open |
+
+Both were applied to the live database on 20 Sep after checking the live definitions matched the
+release repository exactly.
+
 ### 9.3 Capture contract changes (`contract/`, schema 1.0.0 → 2.0.0)
 
 | Field | Change | Why |
@@ -525,9 +550,9 @@ vs polling) is Q4.
 ## 10. Data model (backend)
 
 **Implemented and live** in schema `cbm_app`, owned by the app: `backend/migrations/001_app_schema.sql`
-(tables and functions, repeatable) and `002_api_role.sql` (the API's login). Tested by
-`backend/tests/run-tests.sh` (SQL suite + 15 API tests) against a structure-only copy of the live
-workflow schema, with every migration applied twice. On 19 Sep the first version, created that
+(tables and functions, repeatable), `002_api_role.sql` (the API's login) and `003_decisions.sql`
+(what the FM and the technician decide). Tested by `backend/tests/run-tests.sh` (SQL suite + 33 API
+tests) against a structure-only copy of the live workflow schema, with every migration applied twice. On 19 Sep the first version, created that
 morning in `public`, was moved into `cbm_app` by a guarded one-off script (only the site `ROOM-POC`
 and its access code existed).
 
@@ -544,6 +569,9 @@ and its access code existed).
  cbm_app.reports (id = public.cbm_intake_reports.id, description ≤ 500)
      └──< report_photos (capture_id PK, K, tap, pose, sha256, note ≤ 500)
              ──> public.cbm_capture_attempts(file_id)  ← the workflows' four-attempt intake
+
+ cbm_app.fm_decisions (who tapped: user, membership, session, ticket, action, reason, outcome)
+     └── public.ticket_events holds the decision itself; it records the channel, not the person
 ```
 
 | Rule | Where it is enforced |
@@ -557,9 +585,18 @@ and its access code existed).
 | Reporter sees and writes only own reports, only in the session's site | `claim_capture()`, `attach_capture()`, `reporter_reports()` |
 | Reporter email in intake comes from the account, not the client | `attach_capture()` → `public.cbm_capture_begin()` |
 | The API reaches data only through entry functions | `cbm_app_api`: no table grants; functions `SECURITY DEFINER` with fixed `search_path`; the operator approval path is refused to it |
+| A decision is the workflows' to validate and to carry out | `fm_decide()` only authenticates, checks the site and calls `public.cbm_wf3_begin_action()`; the app writes no ticket column |
+| An FM decides only their own site's tickets | `fm_decide()` / `fm_queue()` over `site_tickets()` |
+| A technician answers only an offer addressed to them, once | `technician_respond()` over `live_offers()`, then `public.cbm_record_offer_response()` |
+| A technician's skills are their own | `set_technician_skills()` writes only the `technicians` row their membership is linked to, from a fixed vocabulary |
 
-Not yet built: notifications (§ 9.4), image storage (Q15), and scoping of `tickets` by site — the
-latter belongs to the multi-FM discussion.
+**Which site a ticket belongs to.** The workflows' `tickets` carries no site. A ticket created from
+an app report is matched through that report (`reports.intake_report_id`); a ticket from the older
+Drive/email intake belongs to the single site whose `sites.receives_unassigned_tickets` is true
+(`ROOM-POC` on the deployment; a unique index allows only one). This is a pilot measure: a second
+site needs a real site column on `tickets`, which belongs to the multi-FM discussion (Q12).
+
+Not yet built: notifications (§ 9.4).
 
 The app's `building_id` is the site id: `ROOM-POC`, "Maddaloni Office", the value of the
 workflows' `CBM_BUILDING_ID`.
@@ -609,6 +646,10 @@ unfinished app phase.
    action returns `BLOCKED` and changes nothing.
 8. Sign-out with queued captures, then sign-in as a different account: the queued captures are not
    sent under the new account.
+9. The same ticket decided in the app and then from the email link (or the reverse) is applied once:
+   the second channel says it has already been decided, and `ticket_events` holds one decision.
+10. An approval taken in the app closes the ticket, updates the model and notifies the technician
+    within about a minute, with no WF3 execution involved and no "closure needs attention" email.
 
 ---
 
@@ -658,9 +699,11 @@ unfinished app phase.
 | Reporter status list | ✅ local outbox only | server status mapping (R-4) |
 | Login, roles, sessions | ✅ database + API endpoints, live and tested (`backend/`) | Android screens; HTTPS exposure (Q16) |
 | Reporter photo + description records | ✅ database, `POST /v1/captures`, `GET /v1/reports`, image store, WF1 app branch (imported, unpublished) | Android capture screens; publish WF1 |
-| Technician offers / jobs / dashboard | — (email + web portal) | new client screens; thin endpoints over existing functions |
+| Technician offers / jobs / dashboard | ✅ endpoints live (`/v1/technician/*`) over the existing dispatch functions | Android screens |
+| Technician skills (Q17) | ✅ `POST /v1/technician/skills` | the one-time "what do you work on?" screen |
 | Technician report template | ✅ schema + renderer + portal | in-app form; server-side PDF |
-| FM dashboard | — (weekly email only) | new client screen over WF3 queries |
+| FM decisions (authorize, reject, approve, rework) | ✅ `/v1/fm/queue`, `/v1/fm/decisions` over the workflows' guarded action | Android cards and the reason box |
+| FM dashboard charts | — (weekly email only) | new client screen over WF3 queries |
 | FM chat | ✅ WF3 agent on n8n hosted chat | app chat endpoint + confirmation cards |
 | WF1 intake of app photos on the current schema | ✅ WF1 app branch (`backend/n8n/`), imported unpublished | publish WF1 |
 | Notifications | ✅ email outbox | app channel on the same events |
