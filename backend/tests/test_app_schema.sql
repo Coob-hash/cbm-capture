@@ -208,7 +208,178 @@ DO $$ DECLARE r jsonb; item jsonb; c1 text:='11111111-1111-4111-8111-11111111111
  ASSERT jsonb_array_length(cbm_app.reporter_reports(r->>'token')->'reports')=0, 'other reporter sees nothing';
 END $$;
 
--- 9. The API's login reaches data only through its entry functions ---------------------------------
+-- 10. The FM's decisions from the app: the workflows' own guards, one channel more ----------------
+-- The ticket WF1 would create from the reporter's photo (section 8), waiting for authorization.
+DO $$ DECLARE tid int; BEGIN
+ INSERT INTO public.tickets(status,reporter_email,intake_report_id,description,category,severity,
+   required_skill,ifc_global_id,ifc_name,ifc_storey,photo_before_url)
+ VALUES ('PENDING_AUTHORIZATION','reporter@example.com','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','Door handle detached',
+   'doors',3,'carpentry','GID-1','Door D-12','Level 1','https://drive.example/photo') RETURNING id INTO tid;
+ UPDATE public.cbm_intake_reports SET ticket_id=tid WHERE id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+ PERFORM pg_temp.put('ticket',tid::text);
+END $$;
+
+DO $$ DECLARE q jsonb; c jsonb; r jsonb; tid int:=pg_temp.get('ticket')::int; BEGIN
+ q := cbm_app.fm_queue(pg_temp.get('fm'));
+ ASSERT q->>'status'='OK' AND jsonb_array_length(q->'authorizations')=1, 'the ticket waits in the FM queue: '||q;
+ c := q#>'{authorizations,0}';
+ ASSERT (c->>'ticket_id')::int=tid AND c->>'description'='Door handle detached'
+  AND c#>>'{location,asset}'='Door D-12' AND c#>>'{reporter,email}'='reporter@example.com'
+  AND (c#>>'{reporter,from_app}')::boolean, 'the card carries what the FM must judge: '||c;
+ ASSERT c#>>'{photo,capture_id}' IS NOT NULL, 'the card points at the reporter photo';
+ ASSERT c#>'{action,allowed_actions}' ? 'approve_intervention'
+  AND c#>>'{action,approval_id}' IS NOT NULL AND c#>>'{action,expected_updated_at}' IS NOT NULL, 'action context: '||c;
+ ASSERT (q#>>'{counts,awaiting_authorization}')::int=1 AND (q#>>'{counts,open}')::int=1, 'counts: '||q;
+ ASSERT cbm_app.fm_queue(pg_temp.get('reporter'))->>'status'='UNAUTHENTICATED', 'a reporter has no queue';
+ ASSERT cbm_app.fm_queue(pg_temp.get('tech'))->>'status'='UNAUTHENTICATED', 'a technician has no queue';
+ -- A rejection needs a reason, as by email.
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','reject_intervention',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r1'));
+ ASSERT r->>'status'='REASON_REQUIRED', 'rejection without a reason: '||r;
+ -- A ticket seen in an older state is refused, not decided blind.
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','approve_intervention',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at','2000-01-01T00:00:00Z','request_id','r2'));
+ ASSERT r->>'status'='BLOCKED' AND r->>'reason' LIKE 'Ticket changed%', 'stale revision: '||r;
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','approve_intervention',
+   'approval_id',gen_random_uuid(),'expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r3'));
+ ASSERT r->>'status'='BLOCKED' AND r->>'reason' LIKE 'Stale approval%', 'stale approval: '||r;
+ ASSERT (SELECT status FROM public.tickets WHERE id=tid)='PENDING_AUTHORIZATION', 'nothing was decided';
+END $$;
+
+-- Another site's FM sees neither the ticket nor a way to decide it.
+INSERT INTO cbm_app.sites(id,name) VALUES ('OTHER-SITE','Another building');
+INSERT INTO cbm_app.site_access_codes(code,site_id) VALUES ('site-code-002','OTHER-SITE');
+DO $$ DECLARE r jsonb; c jsonb; tid int:=pg_temp.get('ticket')::int; BEGIN
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-002','role','FM','email','fm3@example.com','password','long-enough-1','device',pg_temp.dev(9)));
+ PERFORM cbm_app.decide_membership(jsonb_build_object('membership_id',r->>'membership_id','decision','APPROVE','operator',true));
+ c := cbm_app.fm_queue(pg_temp.get('fm'))#>'{authorizations,0}';
+ ASSERT jsonb_array_length(cbm_app.fm_queue(r->>'token')->'authorizations')=0, 'another site sees nothing';
+ ASSERT cbm_app.fm_decide(jsonb_build_object('token',r->>'token','ticket_id',tid,'action','approve_intervention',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r4'))->>'status'='NOT_FOUND',
+  'another site cannot decide this ticket';
+ PERFORM pg_temp.put('fm_other',r->>'token');
+END $$;
+
+-- The authorization itself: applied at once, recorded as FM_APP, and repeating it is harmless.
+DO $$ DECLARE c jsonb; r jsonb; tid int:=pg_temp.get('ticket')::int; BEGIN
+ c := cbm_app.fm_queue(pg_temp.get('fm'))#>'{authorizations,0}';
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','approve_intervention',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r5'));
+ ASSERT r->>'status'='OK' AND r->>'outcome'='APPLIED' AND r->>'ticket_status'='LOCALIZED', 'authorized: '||r;
+ ASSERT (SELECT dispatch_authorized_at IS NOT NULL FROM public.tickets WHERE id=tid), 'dispatch may start';
+ ASSERT (SELECT payload->>'actor'='FM_APP' FROM public.ticket_events WHERE ticket_id=tid AND event='CBM_DISPATCH_AUTHORIZATION'),
+  'the decision is recorded as taken in the app';
+ ASSERT (SELECT count(*) FROM cbm_app.fm_decisions WHERE ticket_id=tid AND outcome='APPLIED')=1, 'who decided it is recorded here';
+ ASSERT (SELECT u.email FROM cbm_app.fm_decisions d JOIN cbm_app.users u ON u.id=d.user_id WHERE d.ticket_id=tid AND d.outcome='APPLIED')='fm@example.com',
+  'the account behind the decision';
+ -- The phone repeats the same tap (flaky network): the same answer, not a second decision.
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','approve_intervention',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r5'));
+ ASSERT r->>'status'='OK', 'repeat is harmless: '||r;
+ ASSERT (SELECT count(*) FROM public.ticket_events WHERE ticket_id=tid AND event='CBM_DISPATCH_AUTHORIZATION')=1, 'decided once';
+ ASSERT jsonb_array_length(cbm_app.fm_queue(pg_temp.get('fm'))->'authorizations')=0, 'and the queue is empty again';
+END $$;
+
+-- 11. The technician: skills, offers, the job in hand ---------------------------------------------
+DO $$ DECLARE r jsonb; j jsonb; tech int; BEGIN
+ SELECT (cbm_app.authenticate(pg_temp.get('tech'),ARRAY['TECHNICIAN'])->>'technician_id')::int INTO tech;
+ PERFORM pg_temp.put('tech_id',tech::text);
+ j := cbm_app.technician_jobs(pg_temp.get('tech'));
+ ASSERT j->>'status'='OK' AND (j#>>'{me,needs_skills}')::boolean, 'a new technician is asked what they work on: '||j;
+ ASSERT j->'skill_catalog' ? 'plumbing' AND jsonb_array_length(j->'offers')=0, 'the catalog and no offers yet';
+ ASSERT cbm_app.set_technician_skills(pg_temp.get('tech'),ARRAY['plumbing','sorcery'])->>'status'='INVALID', 'only the listed skills';
+ ASSERT cbm_app.set_technician_skills(pg_temp.get('tech'),ARRAY[]::text[])->>'status'='INVALID', 'at least one skill';
+ ASSERT cbm_app.set_technician_skills(pg_temp.get('fm'),ARRAY['plumbing'])->>'status'='UNAUTHENTICATED', 'only a technician sets their own skills';
+ r := cbm_app.set_technician_skills(pg_temp.get('tech'),ARRAY['carpentry','plumbing']);
+ ASSERT r->>'status'='OK' AND (SELECT skills FROM public.technicians WHERE id=tech)='{carpentry,plumbing}', 'skills set: '||r;
+ ASSERT NOT (cbm_app.technician_jobs(pg_temp.get('tech'))#>>'{me,needs_skills}')::boolean, 'and dispatch can now select them';
+END $$;
+
+-- The offer WF1 sends, answered on the phone instead of in the email.
+CREATE OR REPLACE FUNCTION pg_temp.offer(tid int, tech int, oid text, expires interval, status text DEFAULT 'LIVE') RETURNS void
+LANGUAGE sql AS $f$
+ INSERT INTO public.ticket_events(ticket_id,event,payload) VALUES (tid,'CBM_DISPATCH_STATE',
+  jsonb_build_object('status','DISPATCHING','offers',jsonb_build_array(jsonb_build_object(
+   'id',oid,'token',repeat('c',64),'technician_id',tech,'full_name','Tina Tech','email','tech@example.com',
+   'date','2026-10-01','slot','14:00-16:00','status',status,'reserved_at',clock_timestamp(),
+   'expires_at',clock_timestamp()+expires))))
+$f$;
+DO $$ DECLARE j jsonb; r jsonb; tid int:=pg_temp.get('ticket')::int; tech int:=pg_temp.get('tech_id')::int; BEGIN
+ UPDATE public.tickets SET status='DISPATCHING' WHERE id=tid;
+ PERFORM pg_temp.offer(tid,tech,'offer-1',interval '48 hours');
+ j := cbm_app.technician_jobs(pg_temp.get('tech'));
+ ASSERT jsonb_array_length(j->'offers')=1 AND (j#>>'{offers,0,ticket_id}')::int=tid
+  AND j#>>'{offers,0,offer,id}'='offer-1' AND j#>>'{offers,0,offer,slot}'='14:00-16:00', 'the offer reaches the app: '||j;
+ ASSERT NOT (j#>'{offers,0}' ? 'reporter') AND NOT (j#>'{offers,0,offer}' ? 'token'),
+  'the technician sees the work, not who reported it or the email link token';
+ ASSERT cbm_app.technician_respond(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,'offer_id','other','decision','accept'))->>'status'='OFFER_GONE',
+  'an offer that is not theirs';
+ ASSERT cbm_app.technician_respond(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'offer_id','offer-1','decision','accept'))->>'status'='UNAUTHENTICATED',
+  'an FM cannot answer an offer';
+ r := cbm_app.technician_respond(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,'offer_id','offer-1','decision','accept'));
+ ASSERT r->>'status'='OK', 'accepted: '||r;
+ ASSERT (SELECT payload->>'decision' FROM public.ticket_events WHERE ticket_id=tid AND event='CBM_RESPONSE')='accept',
+  'recorded exactly as the offer email records it';
+ ASSERT cbm_app.technician_respond(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,'offer_id','offer-1','decision','deny'))->>'status'='OFFER_GONE',
+  'no second answer to one offer';
+ ASSERT jsonb_array_length(cbm_app.technician_jobs(pg_temp.get('tech'))->'offers')=0, 'an answered offer leaves the list';
+ -- An expired offer is not shown at all.
+ PERFORM pg_temp.offer(tid,tech,'offer-2',interval '-1 minute');
+ ASSERT jsonb_array_length(cbm_app.technician_jobs(pg_temp.get('tech'))->'offers')=0, 'an expired offer is gone';
+END $$;
+
+-- The job in hand, its photo, and the report template link.
+DO $$ DECLARE j jsonb; r jsonb; cap uuid; tid int:=pg_temp.get('ticket')::int; tech int:=pg_temp.get('tech_id')::int; BEGIN
+ UPDATE public.tickets SET status='ASSIGNED', technician_id=tech, scheduled_date='2026-10-01', scheduled_slot='14:00-16:00' WHERE id=tid;
+ j := cbm_app.technician_jobs(pg_temp.get('tech'));
+ ASSERT jsonb_array_length(j->'current')=1 AND (j#>>'{current,0,report_needed}')::boolean
+  AND j#>>'{current,0,report_state}'='TO_DO', 'the accepted job waits for its report: '||j;
+ cap := (j#>>'{current,0,photo,capture_id}')::uuid;
+ ASSERT cap IS NOT NULL, 'the technician sees the reporter photo of their own job';
+ ASSERT cbm_app.fm_photo(pg_temp.get('tech'),cap)->>'status'='OK', 'and may fetch it';
+ ASSERT cbm_app.fm_photo(pg_temp.get('fm'),cap)->>'status'='OK', 'so may the site FM';
+ ASSERT cbm_app.fm_photo(pg_temp.get('fm_other'),cap)->>'status'='NOT_FOUND', 'another site may not';
+ ASSERT cbm_app.fm_photo(pg_temp.get('reporter'),cap)->>'status'='UNAUTHENTICATED', 'a reporter uses their own list';
+ -- With the accepted offer recorded by WF1, the workflows issue the template link.
+ INSERT INTO public.ticket_events(ticket_id,event,payload) VALUES (tid,'CBM_DISPATCH_STATE',
+  jsonb_build_object('status','ASSIGNED','offers',jsonb_build_array(jsonb_build_object(
+   'id','offer-1','token',repeat('c',64),'technician_id',tech,'status','ACCEPTED','full_name','Tina Tech',
+   'email','tech@example.com','date','2026-10-01','slot','14:00-16:00','expires_at',clock_timestamp()+interval '48 hours'))));
+ r := cbm_app.technician_report_link(pg_temp.get('tech'),tid);
+ ASSERT r->>'status'='OK' AND r->>'token' ~ '^[0-9a-f]{64}$', 'the report template link: '||r;
+ ASSERT cbm_app.technician_report_link(pg_temp.get('fm'),tid)->>'status'='UNAUTHENTICATED', 'only a technician';
+END $$;
+
+-- 12. The completion review: send it back with a reason, or approve and let WF2 close -------------
+DO $$ DECLARE q jsonb; c jsonb; r jsonb; tid int:=pg_temp.get('ticket')::int; BEGIN
+ UPDATE public.tickets SET status='PENDING_APPROVAL', approval_id=gen_random_uuid(),
+  report_text='Handle replaced, hinges adjusted.' WHERE id=tid;
+ q := cbm_app.fm_queue(pg_temp.get('fm'));
+ ASSERT jsonb_array_length(q->'completions')=1, 'the completed work waits for the FM: '||q;
+ c := q#>'{completions,0}';
+ ASSERT c#>>'{technician,name}'='Tina Tech' AND (c#>>'{technician,first_job}')::boolean
+  AND (c#>>'{technician,jobs_completed}')::int=0, 'a newcomer is flagged as a first job: '||c;
+ ASSERT c#>>'{work,report_text}'='Handle replaced, hinges adjusted.', 'the report the FM judges';
+ ASSERT c#>'{action,allowed_actions}' ? 'approve_completion' AND c#>'{action,allowed_actions}' ? 'request_rework', 'both ways out';
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','request_rework',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r6'));
+ ASSERT r->>'status'='REASON_REQUIRED', 'rework needs a reason: '||r;
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','request_rework','reason','The handle is still loose.',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r7'));
+ ASSERT r->>'status'='OK' AND r->>'outcome'='READY' AND (r->>'settling')::boolean, 'the decision is recorded for WF2 to settle: '||r;
+ ASSERT (SELECT payload->>'decision'='REJECTED' AND payload->>'actor'='FM_APP' AND payload->>'reason'='The handle is still loose.'
+   FROM public.ticket_events WHERE ticket_id=tid AND event='CBM_WF2_APPROVAL'), 'rework recorded with its reason';
+ ASSERT (SELECT status FROM public.tickets WHERE id=tid)='PENDING_APPROVAL', 'the workflows, not the app, move the ticket';
+ ASSERT (public.cbm_wf2_review_status(jsonb_build_object('ticketId',tid,
+   'approvalId',(SELECT approval_id FROM public.tickets WHERE id=tid))))->>'route'='DECIDED', 'WF2 sees a decision to settle';
+ -- And the opposite decision can no longer be slipped in from the app.
+ c := cbm_app.fm_queue(pg_temp.get('fm'))#>'{completions,0}';
+ r := cbm_app.fm_decide(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,'action','approve_completion',
+   'approval_id',c#>>'{action,approval_id}','expected_updated_at',c#>>'{action,expected_updated_at}','request_id','r8'));
+ ASSERT r->>'status'='BLOCKED', 'an opposite decision is refused: '||r;
+END $$;
+
+-- 13. The API's login reaches data only through its entry functions --------------------------------
 DO $$ BEGIN
  ASSERT cbm_app.store_capture(pg_temp.get('tech'),jsonb_build_object('capture_id','11111111-1111-4111-8111-111111111111'))->>'status'='UNAUTHENTICATED', 'store needs a reporter session';
 END $$;
@@ -230,6 +401,21 @@ DO $$ DECLARE r jsonb; BEGIN
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN PERFORM cbm_app.record_intake('{}'); RAISE EXCEPTION 'API login recorded an intake outcome';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.fm_card(1); RAISE EXCEPTION 'API login built a card without a session';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM 1 FROM cbm_app.site_tickets('TEST-SITE'); RAISE EXCEPTION 'API login listed a site''s tickets';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM 1 FROM cbm_app.live_offers(1); RAISE EXCEPTION 'API login read live offers';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ -- The workflows' own functions run with the caller's rights, so the API login cannot reach a
+ -- ticket through them either: only cbm_app.fm_decide, which is SECURITY DEFINER, can.
+ BEGIN PERFORM public.cbm_wf3_begin_action(jsonb_build_object('action','approve_intervention','ticketId',1,
+   'approvalId',gen_random_uuid(),'requestId','x','sessionId','x','question','q','actor','FM_CHAT','truncated',false));
+  RAISE EXCEPTION 'API login reached tickets through the workflow action helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ ASSERT cbm_app.fm_queue(repeat('0',64))->>'status'='UNAUTHENTICATED', 'the FM queue needs a session';
+ ASSERT cbm_app.fm_decide('{"token":"x"}')->>'status'='UNAUTHENTICATED', 'a decision needs a session';
+ ASSERT cbm_app.technician_jobs(repeat('0',64))->>'status'='UNAUTHENTICATED', 'the job list needs a session';
  r := cbm_app.decide_membership(jsonb_build_object('membership_id',(SELECT gen_random_uuid()),'decision','APPROVE','operator',true));
  ASSERT r->>'status' IN ('FORBIDDEN','NOT_FOUND'), 'operator path: '||r;
 END $$;

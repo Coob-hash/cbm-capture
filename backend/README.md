@@ -15,8 +15,9 @@ run on top of the same PostgreSQL database (schema `public`) and never receive c
 |---|---|
 | `migrations/001_app_schema.sql` | Schema `cbm_app`: sites, accounts, roles, sessions, devices, reports, photos, and every function. Repeatable. |
 | `migrations/002_api_role.sql` | The API's login `cbm_app_api`: no table privileges, `EXECUTE` on the entry functions only. |
+| `migrations/003_decisions.sql` | What the FM and the technician decide from the phone. No second decision path: it authenticates, checks the site, and calls the workflows' own guarded functions. |
 | `cbm_api/` | FastAPI service: HTTP, Google token verification, rate and size limits. |
-| `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`), `run-tests.sh`. |
+| `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`, `test_api_decisions.py`), `run-tests.sh`. |
 | `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, and `Approve-CbmFm.ps1` (list, approve or reject FM requests). |
 | `n8n/` | The WF1 app branch: patch script and tests. |
 
@@ -37,6 +38,17 @@ cannot do:
 the database-operator path of `decide_membership`. `tests/test_app_schema.sql` and
 `test_api_auth.py` check each of these.
 
+**Decisions belong to the workflows.** The app never writes a ticket's status. `fm_decide` calls
+`public.cbm_wf3_begin_action` with actor `FM_APP` — the same function the approval email and the
+WF3 chat call, with the same guards (stage, current approval cycle, expected revision, no opposite
+decision, one decision per request key). An authorization is applied there and then, and WF1
+dispatches; a completion decision is recorded and WF2's one-minute review loop does the IFC write,
+the closure and the notices. A technician's answer to an offer goes through
+`public.cbm_record_offer_response`, exactly as the offer email's link does. Two small changes were
+needed on the workflow side, both in the release repository: `FM_APP` accepted as an actor, and
+WF2's review router treating an app decision as ready to settle (it has no WF3 execution to wait
+for).
+
 ## Endpoints (v1)
 
 | Method | Path | Auth | Purpose |
@@ -51,6 +63,13 @@ the database-operator path of `decide_membership`. `tests/test_app_schema.sql` a
 | POST | `/v1/auth/logout` | Bearer | Revoke the session |
 | POST | `/v1/captures` | Bearer (reporter) | Multipart `metadata` (JSON) + `image` (JPEG, ≤ 5 MiB). Checks SHA-256 and the decoded frame size, stores the image, marks it `STORED`, which notifies WF1. Repeatable per `capture_id` |
 | GET | `/v1/reports` | Bearer (reporter) | Own reports with a plain-language status code |
+| GET | `/v1/fm/queue` | Bearer (FM) | The two queues that wait for a decision — interventions to authorize, completions to approve — plus the site's counts |
+| POST | `/v1/fm/decisions` | Bearer (FM) | `approve_intervention` · `reject_intervention` · `approve_completion` · `request_rework`. A rejection or rework needs a reason. `409 BLOCKED` when the ticket moved on |
+| GET | `/v1/photos/{capture_id}` | Bearer (FM, or the technician on that job) | The reporter's photo behind a card |
+| GET | `/v1/technician/jobs` | Bearer (technician) | Offers to answer, jobs in hand, work completed, own skills |
+| POST | `/v1/technician/offers` | Bearer (technician) | Accept or decline an offer. `409 OFFER_GONE` when it expired or was answered |
+| POST | `/v1/technician/skills` | Bearer (technician) | Their own skills, from the listed vocabulary. Nobody else sets them |
+| GET | `/v1/technician/jobs/{id}/report-link` | Bearer (technician) | A link to the workflows' report template for a job of theirs |
 
 The internal image service (`cbm_api.internal`, container `api-internal`, alias
 `cbm-app-internal:8081`, **no published port**) serves `GET /internal/captures/{id}/image` to
@@ -105,8 +124,10 @@ API (network alias `cbm-app-api`) and everything else to n8n, as before. If the 
 client address ngrok observed, which is the **last** `X-Forwarded-For` entry. Earlier entries can
 be forged by the client.
 
-`app.env` also holds `CBM_APP_GOOGLE_CLIENT_IDS`. It stays empty until a Google OAuth client
-exists; while empty, the Google endpoints answer `503 GOOGLE_NOT_CONFIGURED`.
+`app.env` also holds `CBM_APP_GOOGLE_CLIENT_IDS`, empty until a Google OAuth client exists; while
+empty, the Google endpoints answer `503 GOOGLE_NOT_CONFIGURED`. And `CBM_APP_PORTAL_BASE_URL`,
+where n8n serves the technician report template (e.g. `https://<ngrok domain>/webhook`); while
+empty, the report-link endpoint answers `503 PORTAL_NOT_CONFIGURED`.
 
 ## Dependencies
 

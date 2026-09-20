@@ -29,4 +29,5 @@ GRANT EXECUTE ON FUNCTION
  cbm_app.store_capture(text, jsonb),
  cbm_app.reporter_reports(text, integer)
 TO cbm_app_api;
+-- The entry points added by later migrations are granted there, after this file's blanket REVOKE.
 COMMIT;

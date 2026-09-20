@@ -14,6 +14,8 @@ services:
       CBM_APP_DATABASE_URL: postgresql://cbm_app_api:${CBM_APP_API_DB_PASSWORD:?Run Install-CbmApp.ps1}@cbm-postgres:5432/cbm_demo
       CBM_APP_GOOGLE_CLIENT_IDS: ${CBM_APP_GOOGLE_CLIENT_IDS:-}
       CBM_APP_TRUST_PROXY: ${CBM_APP_TRUST_PROXY:-1}
+      # Where n8n serves the technician report template; the app hands the technician a link to it.
+      CBM_APP_PORTAL_BASE_URL: ${CBM_APP_PORTAL_BASE_URL:-}
     volumes:
       - captures:/data/captures
     ports:

@@ -13,6 +13,7 @@ import pytest
 os.environ.setdefault("CBM_APP_GOOGLE_CLIENT_IDS", "test-client.apps.googleusercontent.com")
 os.environ.setdefault("CBM_APP_AUTH_REQUESTS_PER_MINUTE", "10000")
 os.environ.setdefault("CBM_APP_CAPTURE_DIR", "/tmp/cbm-captures")
+os.environ.setdefault("CBM_APP_PORTAL_BASE_URL", "https://portal.example.invalid")
 
 from fastapi.testclient import TestClient  # noqa: E402
 

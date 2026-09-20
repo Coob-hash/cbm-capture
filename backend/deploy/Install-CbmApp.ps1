@@ -64,6 +64,16 @@ if (-not (Test-Path -LiteralPath $envPath)) {
     )
     [IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
 }
+# Options added by later versions: appended once, empty, never overwriting a value already set.
+$existing = Get-Content -LiteralPath $envPath
+$optional = [ordered]@{
+    CBM_APP_PORTAL_BASE_URL = '# Where n8n serves the technician report template, e.g. https://<ngrok domain>/webhook'
+}
+foreach ($key in $optional.Keys) {
+    if (-not ($existing | Where-Object { $_ -match "^$key=" })) {
+        Add-Content -LiteralPath $envPath -Value @($optional[$key], "$key=")
+    }
+}
 $passwordLine = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^CBM_APP_API_DB_PASSWORD=[0-9a-f]{64}$' } | Select-Object -First 1
 if (-not $passwordLine) { throw "$envPath has no valid CBM_APP_API_DB_PASSWORD." }
 $password = $passwordLine.Split('=', 2)[1]

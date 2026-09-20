@@ -19,7 +19,7 @@ from uuid import UUID
 import psycopg
 from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -88,6 +88,34 @@ class GoogleLogin(Strict):
 
 class SelectRole(Strict):
     membership_id: UUID
+
+
+FmAction = Literal["approve_intervention", "reject_intervention", "approve_completion", "request_rework"]
+
+
+class Decision(Strict):
+    """The FM's decision on one ticket, as the dashboard card offered it.
+
+    approval_id and expected_updated_at come from the card: the workflows refuse the decision if
+    the ticket moved on meanwhile, so nobody decides a ticket they are no longer looking at.
+    request_id is the phone's own id for this tap, which makes a repeat harmless.
+    """
+    ticket_id: int = Field(ge=1, le=999_999_999)
+    action: FmAction
+    reason: str | None = Field(default=None, max_length=2000)
+    approval_id: UUID
+    expected_updated_at: str = Field(max_length=64)
+    request_id: str = Field(max_length=80, pattern=r"^[A-Za-z0-9_:.-]+$")
+
+
+class OfferResponse(Strict):
+    ticket_id: int = Field(ge=1, le=999_999_999)
+    offer_id: str = Field(max_length=100)
+    decision: Literal["accept", "deny"]
+
+
+class Skills(Strict):
+    skills: list[str] = Field(min_length=1, max_length=10)
 
 
 # ---- Cross-cutting guards ----------------------------------------------------------------------
@@ -270,3 +298,77 @@ def submit_capture(token: Annotated[str, Depends(bearer)],
 @app.get("/v1/reports")
 def my_reports(token: Annotated[str, Depends(bearer)]):
     return {"reports": check(db.call("reporter_reports", token, 50))["reports"]}
+
+
+# ---- The facility manager's decisions -----------------------------------------------------------
+
+@app.get("/v1/fm/queue")
+def fm_queue(token: Annotated[str, Depends(bearer)]):
+    """The two queues waiting for this FM: authorize an intervention, approve a completion."""
+    result = check(db.call("fm_queue", token))
+    return {k: result[k] for k in ("site_id", "authorizations", "completions", "counts")}
+
+
+@app.post("/v1/fm/decisions")
+def fm_decide(body: Decision, token: Annotated[str, Depends(bearer)]):
+    """Approve or reject, exactly as the email link does; the workflows carry it out.
+
+    A rejection or a rework request needs a reason. 409 means the ticket moved on (someone decided
+    it by email or in the chat, or the stage changed): the app reloads the queue.
+    """
+    payload = body.model_dump(mode="json") | {"token": token}
+    result = db.call("fm_decide", payload)
+    if result is None:
+        fail("UNAUTHENTICATED")
+    if result.get("status") != "OK":
+        if result.get("status") == "BLOCKED":
+            fail("BLOCKED", message=result.get("reason") or None)
+        fail(result.get("status") or "INTERNAL")
+    return {k: result[k] for k in ("outcome", "ticket_id", "ticket_status", "settling", "card")}
+
+
+@app.get("/v1/photos/{capture_id}")
+def photo(capture_id: UUID, token: Annotated[str, Depends(bearer)]):
+    """The reporter's photo behind a card: for the site's FM, or the technician whose job it is."""
+    result = check(db.call("fm_photo", token, str(capture_id)))
+    path = captures.path_for(settings.capture_dir, str(capture_id))
+    if path is None or not path.is_file():
+        fail("NOT_FOUND", message="The image is no longer stored.")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+# ---- The technician's jobs -----------------------------------------------------------------------
+
+@app.get("/v1/technician/jobs")
+def technician_jobs(token: Annotated[str, Depends(bearer)]):
+    """Offers to answer, jobs in hand, work completed, and this technician's own skills."""
+    result = check(db.call("technician_jobs", token))
+    return {k: result[k] for k in ("me", "skill_catalog", "offers", "current", "completed")}
+
+
+@app.post("/v1/technician/offers")
+def technician_respond(body: OfferResponse, token: Annotated[str, Depends(bearer)]):
+    """Accept or decline a job offer: the same record the offer email's link writes."""
+    result = check(db.call("technician_respond", body.model_dump(mode="json") | {"token": token}))
+    return {"ticket_id": result["ticket_id"], "decision": result["decision"]}
+
+
+@app.post("/v1/technician/skills")
+def technician_skills(body: Skills, token: Annotated[str, Depends(bearer)]):
+    """The technician's own skills, from "What do you work on?". Dispatch matches jobs to them."""
+    result = db.call("set_technician_skills", token, body.skills)
+    if result is not None and result.get("status") == "INVALID":
+        fail("INVALID", http=422, message="Choose from the listed skills.")
+    return {"skills": check(result)["skills"]}
+
+
+@app.get("/v1/technician/jobs/{ticket_id}/report-link")
+def technician_report_link(ticket_id: int, token: Annotated[str, Depends(bearer)]):
+    """The link to the workflows' report template for a job of this technician's."""
+    if not 1 <= ticket_id <= 999_999_999:
+        fail("NOT_FOUND")
+    if not settings.portal_base_url:
+        fail("PORTAL_NOT_CONFIGURED", http=503, message="The report form address is not configured.")
+    result = check(db.call("technician_report_link", token, ticket_id))
+    url = f"{settings.portal_base_url}/cbm-technician-report?ticket={result['ticket_id']}&token={result['token']}"
+    return {"ticket_id": result["ticket_id"], "url": url, "expires_at": result["expires_at"]}

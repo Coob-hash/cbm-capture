@@ -363,6 +363,14 @@ without changing screen.
 - **F-3** Two small charts: open tickets by status, and open workload per technician (WF3
   `ticket_counts`, `technician_workload`). Values come from the same read-only queries the agent
   uses, so the dashboard and the chat can never quote different numbers.
+- **F-2a** **Decide from the card.** Every queue item carries the two buttons of its stage —
+  *Authorize* / *Reject* before the job is offered, *Approve* / *Send back* after the technician's
+  report — and rejecting or sending back opens a free-text reason, which is required. The buttons
+  call the workflows' own guarded action (`cbm_app.fm_decide` → `public.cbm_wf3_begin_action`,
+  actor `FM_APP`), so **a tap in the app, a click in the email and a sentence in the chat are one
+  decision**: the first one wins and the others are refused. When the ticket has moved on, the app
+  says so and reloads the queue instead of deciding blind (the card carries the approval cycle and
+  the revision it was drawn from). Built: § 9.2, `backend/migrations/003_decisions.sql`.
 - **F-4** Data refreshes on open, on pull-to-refresh, and when a notification arrives.
 - **F-4a** **"First job" tag.** Wherever the FM sees a technician (offers, tickets, workload), a
   technician with no completed job carries a small blinking **first job** tag, smaller than the
@@ -454,18 +462,29 @@ The rest are planned; "Backed by" names what the API calls or writes.
 | `GET /v1/notifications?since=` | all | notification feed (§ 9.4) | **new** |
 | `POST /v1/captures` | reporter | `cbm_app.claim_capture()` → store image (Q15) → `cbm_app.attach_capture()` → workflows' `cbm_capture_begin()`; WF1 then runs VPS/IFC/vision on it (Q14) | contract **changed** (§ 9.3), DB done |
 | `GET /v1/reports` | reporter | `cbm_app.reporter_reports()` | DB done |
-| `GET /v1/tech/offers` | technician | live offers in `CBM_DISPATCH_STATE` for self | **new**, read-only |
-| `POST /v1/tech/offers/{ticket}/response` | technician | `cbm_record_offer_response()` → Dispatch - Process Responses | new wrapper, existing logic |
-| `GET /v1/tech/jobs` | technician | `tickets` in `ASSIGNED`/`REWORK` for self | **new**, read-only |
+| `GET /v1/technician/jobs` | technician | `cbm_app.technician_jobs()`: live offers from `CBM_DISPATCH_STATE`, jobs in hand, work completed, own skills | ✅ running |
+| `POST /v1/technician/offers` | technician | `cbm_app.technician_respond()` → `cbm_record_offer_response()` → WF1 dispatch | ✅ running |
+| `POST /v1/technician/skills` | technician | `cbm_app.set_technician_skills()` on their own `technicians` row (Q17) | ✅ running |
+| `GET /v1/technician/jobs/{id}/report-link` | technician | `cbm_issue_technician_report_link()`; opens the workflows' existing template (T-5 replaces it with an in-app form) | ✅ running |
 | `GET /v1/tech/jobs/{ticket}/report` | technician | `cbm_technician_report_access()` (prefill) | new wrapper |
 | `POST /v1/tech/jobs/{ticket}/report` | technician | render PDF (`report-pdf.js`) → `cbm_claim_technician_report()` → store → `cbm_record_technician_report()` → WF2 | new wrapper, existing logic |
 | `GET /v1/tech/summary?from=&to=` | technician | read-only aggregate for self | **new**, read-only |
-| `GET /v1/fm/dashboard` | FM | WF3 read queries (`ticket_counts`, `overdue_tickets`, `technician_workload`, pending queues) | new wrapper, existing queries |
+| `GET /v1/fm/queue` | FM | `cbm_app.fm_queue()`: the two decision queues and the site's counts | ✅ running |
+| `POST /v1/fm/decisions` | FM | `cbm_app.fm_decide()` → `public.cbm_wf3_begin_action()` (actor `FM_APP`) | ✅ running |
+| `GET /v1/photos/{capture_id}` | FM, technician on their own job | the reporter's photo from the capture store | ✅ running |
+| `GET /v1/fm/dashboard` | FM | WF3 read queries (`ticket_counts`, `overdue_tickets`, `technician_workload`) for the charts | new wrapper, existing queries |
 | `GET /v1/fm/tickets/{id}` | FM | WF3 `ticket_lookup` / `ticket_history` | new wrapper |
 | `POST /v1/fm/chat` | FM | internal n8n webhook → WF3 `FM Dashboard Agent`, `sessionId` = account (the one API → n8n call, § 9.1) | new trigger, existing agent |
 
 The technician's offer and report endpoints replace token-in-URL links. The link tokens stay valid
 for the email fallback; the app endpoints authenticate by session and resolve ownership in the database.
+
+**One decision, three channels.** `POST /v1/fm/decisions` and `POST /v1/technician/offers` do not
+re-implement anything: they authenticate the person, check the ticket belongs to their site (or the
+offer to them), and then call the very function the email link and the WF3 chat call. The workflows
+keep deciding what a decision means and carrying it out — an authorization is applied at once and
+WF1 dispatches; a completion decision is recorded and WF2's one-minute review loop performs the IFC
+write, the closure and the notices. The app never writes a ticket's status itself.
 
 ### 9.3 Capture contract changes (`contract/`, schema 1.0.0 → 2.0.0)
 
@@ -560,7 +579,7 @@ so an iOS target can be added later without restructuring (Q5).
 | Phase | Reporter | Technician | FM |
 |---|---|---|---|
 | **0 — structure** | move the Android code into KMP modules; no behaviour change, the 16 tests still pass | | |
-| **1 — identity** | ✅ built (Android): join by QR link or code, sign-up, login, one-hour sessions, My reports, Open a report → `/v1/captures` → WF1; not yet tried on a phone | sign-up, "waiting for approval" ✅ | sign-up ✅; approving technicians still by SQL |
+| **1 — identity** | ✅ built (Android): join by QR link or code, sign-up, login, one-hour sessions, My reports, Open a report → `/v1/captures` → WF1; not yet tried on a phone | sign-up ✅; API for skills, offers and jobs ✅, screens next | sign-up ✅; API for the queue and both decisions ✅, screens next |
 | **2 — technician** | notifications | offers, accept/decline, in-app report, dashboard | — |
 | **3 — FM** | — | — | split dashboard + chat, confirmation cards |
 | **4 — email off** | email fallback disabled per account once the app is confirmed on their device | same | same (weekly report stays email) |
@@ -619,14 +638,14 @@ unfinished app phase.
 | Q7 | What does a reporter see when the FM rejects? | generic "not scheduled" · FM's reason · FM chooses per decision |
 | Q8 | ~~Reporter accounts~~ **Decided 19 Sep** | Named accounts, self sign-up from the site QR code; USER active at once, TECHNICIAN/FM approved (§ 3, § 4.1) |
 | Q9 | Languages | Italian + English, as the technician template already is |
-| Q10 | Should the FM have direct approve/reject buttons on the dashboard, or only via the chat? | chat-only with confirmation cards (current proposal) · buttons calling the same guarded helper |
+| Q10 | ~~Approve/reject buttons, or only the chat?~~ **Decided 20 Sep** | Both: the card carries the buttons and the chat takes the same action, through one guarded helper (F-2a). Whoever decides first wins — app, email link or chat — and the emails stay on during the pilot |
 | Q11 | Queued reports after the hour expires | wait for the next login (current rule) · a narrow upload-only credential issued at login, valid e.g. 24 h, usable only to deliver captures already in that account's outbox |
-| Q12 | Several FMs and several places (to be discussed) | tickets scoped by site; which FM receives an authorization request; whether an FM can see more than one site; who is the site's admin |
+| Q12 | Several FMs and several places (partly decided 20 Sep) | **Every active FM of a site sees that site's queue and any one of them may decide; the event records which person did.** A session serves one site. Still open: a ticket carries no site of its own — an app ticket is matched through its report, and tickets from the older Drive/email intake go to the one site flagged `receives_unassigned_tickets`. That flag is a pilot measure; with a second site, tickets need a real site column. Also open: who is a site's admin |
 | Q13 | Distribution before the Play Store | For now: the QR code carries `cbmapp://join?site=<code>`, which the phone's camera opens in the installed app (APK sideloaded). Play Console internal testing, with the site code passed through the Play Install Referrer, remains open |
 | Q14 | ~~How do the workflows notice new app rows?~~ **Decided 19 Sep** | `NOTIFY cbm_app_capture` received by a Postgres Trigger in WF1, plus a sweep on the existing one-minute tick. Built for captures; WF1's app branch joins the Drive branch at `Capture Input` (`backend/n8n/README.md`) |
 | Q15 | ~~Where are capture images stored?~~ **Decided 19 Sep** | On the App API's own volume; WF1 fetches them from the internal image service (`cbm-app-internal:8081`, not published). The Drive branch stays until it is deleted |
 | Q16 | ~~How does the phone reach the API over HTTPS?~~ **Decided 19 Sep** | The existing ngrok domain. A Caddy proxy (`edge`) in the workflow stack sends `/v1/*` to the App API and everything else to n8n, as before; n8n never depends on the app being up |
-| Q17 | Where does a self-registered technician's skill list come from? | Dispatch offers a job only to technicians whose `skills` contain the job's required skill. Options: a one-time "What do you work on?" step after sign-up · the FM sets it · both |
+| Q17 | ~~Where does a self-registered technician's skill list come from?~~ **Decided 20 Sep** | The technician alone: a one-time "What do you work on?" step right after sign-up, changeable later in their own settings. The FM never touches another person's skills; only an administrator could, directly in the database, and normally nobody does. Until skills are set, dispatch offers that technician nothing |
 
 ---
 

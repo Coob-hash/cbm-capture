@@ -15,6 +15,9 @@ class Settings:
     max_body_bytes: int
     max_capture_bytes: int
     capture_dir: str
+    # Where the workflows' technician report template is served (n8n webhooks). The app opens
+    # <portal_base_url>/cbm-technician-report?ticket=..&token=.. in the phone's browser.
+    portal_base_url: str
 
 
 def load() -> Settings:
@@ -31,4 +34,5 @@ def load() -> Settings:
         # A capture is a <= 1280 px JPEG, typically 200-400 KB; 5 MiB leaves room without inviting abuse.
         max_capture_bytes=int(os.environ.get("CBM_APP_MAX_CAPTURE_BYTES", str(5 * 1024 * 1024))),
         capture_dir=os.environ.get("CBM_APP_CAPTURE_DIR", "/data/captures"),
+        portal_base_url=os.environ.get("CBM_APP_PORTAL_BASE_URL", "").rstrip("/"),
     )

@@ -401,6 +401,370 @@
           }
         }
       }
+    },
+    "/v1/fm/queue": {
+      "get": {
+        "summary": "Fm Queue",
+        "description": "The two queues waiting for this FM: authorize an intervention, approve a completion.",
+        "operationId": "fm_queue_v1_fm_queue_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/fm/decisions": {
+      "post": {
+        "summary": "Fm Decide",
+        "description": "Approve or reject, exactly as the email link does; the workflows carry it out.\n\nA rejection or a rework request needs a reason. 409 means the ticket moved on (someone decided\nit by email or in the chat, or the stage changed): the app reloads the queue.",
+        "operationId": "fm_decide_v1_fm_decisions_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Decision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/photos/{capture_id}": {
+      "get": {
+        "summary": "Photo",
+        "description": "The reporter's photo behind a card: for the site's FM, or the technician whose job it is.",
+        "operationId": "photo_v1_photos__capture_id__get",
+        "parameters": [
+          {
+            "name": "capture_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Capture Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/technician/jobs": {
+      "get": {
+        "summary": "Technician Jobs",
+        "description": "Offers to answer, jobs in hand, work completed, and this technician's own skills.",
+        "operationId": "technician_jobs_v1_technician_jobs_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/technician/offers": {
+      "post": {
+        "summary": "Technician Respond",
+        "description": "Accept or decline a job offer: the same record the offer email's link writes.",
+        "operationId": "technician_respond_v1_technician_offers_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfferResponse"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/technician/skills": {
+      "post": {
+        "summary": "Technician Skills",
+        "description": "The technician's own skills, from \"What do you work on?\". Dispatch matches jobs to them.",
+        "operationId": "technician_skills_v1_technician_skills_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Skills"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/technician/jobs/{ticket_id}/report-link": {
+      "get": {
+        "summary": "Technician Report Link",
+        "description": "The link to the workflows' report template for a job of this technician's.",
+        "operationId": "technician_report_link_v1_technician_jobs__ticket_id__report_link_get",
+        "parameters": [
+          {
+            "name": "ticket_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ticket Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -424,6 +788,65 @@
           "image"
         ],
         "title": "Body_submit_capture_v1_captures_post"
+      },
+      "Decision": {
+        "properties": {
+          "ticket_id": {
+            "type": "integer",
+            "maximum": 999999999.0,
+            "minimum": 1.0,
+            "title": "Ticket Id"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "approve_intervention",
+              "reject_intervention",
+              "approve_completion",
+              "request_rework"
+            ],
+            "title": "Action"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "approval_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Id"
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Expected Updated At"
+          },
+          "request_id": {
+            "type": "string",
+            "maxLength": 80,
+            "pattern": "^[A-Za-z0-9_:.-]+$",
+            "title": "Request Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "action",
+          "approval_id",
+          "expected_updated_at",
+          "request_id"
+        ],
+        "title": "Decision",
+        "description": "The FM's decision on one ticket, as the dashboard card offered it.\n\napproval_id and expected_updated_at come from the card: the workflows refuse the decision if\nthe ticket moved on meanwhile, so nobody decides a ticket they are no longer looking at.\nrequest_id is the phone's own id for this tap, which makes a repeat harmless."
       },
       "Device": {
         "properties": {
@@ -577,6 +1000,37 @@
         ],
         "title": "Login"
       },
+      "OfferResponse": {
+        "properties": {
+          "ticket_id": {
+            "type": "integer",
+            "maximum": 999999999.0,
+            "minimum": 1.0,
+            "title": "Ticket Id"
+          },
+          "offer_id": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Offer Id"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "deny"
+            ],
+            "title": "Decision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "offer_id",
+          "decision"
+        ],
+        "title": "OfferResponse"
+      },
       "SelectRole": {
         "properties": {
           "membership_id": {
@@ -645,6 +1099,25 @@
         ],
         "title": "SignUp"
       },
+      "Skills": {
+        "properties": {
+          "skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Skills"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "skills"
+        ],
+        "title": "Skills"
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -686,11 +1159,5 @@
         "title": "ValidationError"
       }
     }
-  },
-  "servers": [
-    {
-      "url": "https://<your-domain>",
-      "description": "behind the edge proxy: /v1/* is the App API"
-    }
-  ]
+  }
 }

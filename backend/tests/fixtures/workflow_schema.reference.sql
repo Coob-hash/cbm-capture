@@ -1033,6 +1033,9 @@ BEGIN
   ELSIF EXISTS(SELECT 1 FROM ticket_events WHERE ticket_id=t.id AND event='CBM_WF3_ACTION_RESULT'
    AND payload->>'request_key'=ev.payload->>'request_key') THEN route='DECIDED';
   ELSIF ev.payload->>'request_key' IS NULL THEN route='DECIDED';
+  -- A decision taken in the mobile app (cbm_app.fm_decide) has no WF3 execution behind it to wait
+  -- for: the record is all there is, and this loop carries out the rest.
+  ELSIF ev.payload->>'actor'='FM_APP' THEN route='DECIDED';
   ELSIF ev.created_at<statement_timestamp()-interval '10 minutes' THEN route='ATTENTION';
   ELSE route='PROCESSING'; END IF;
   RETURN r||jsonb_build_object('route',route,'decision',ev.payload->>'decision',
@@ -1086,7 +1089,9 @@ DECLARE t tickets%ROWTYPE; tech technicians%ROWTYPE; a text=p->>'action'; aid uu
 BEGIN
  IF a NOT IN ('approve_intervention','reject_intervention','resend_approval_email','approve_completion','request_rework')
  OR a IS NULL OR coalesce(p->>'requestId','')='' OR coalesce(p->>'sessionId','')=''
- OR coalesce(p->>'question','')='' OR p->>'actor' NOT IN ('FM_CHAT','FM_EMAIL_LINK')
+ -- FM_APP: the same decision taken by an authenticated facility manager in the mobile app
+ -- (cbm_app.fm_decide). Identical guards; only the channel recorded on the event differs.
+ OR coalesce(p->>'question','')='' OR p->>'actor' NOT IN ('FM_CHAT','FM_EMAIL_LINK','FM_APP')
  OR p->>'actor' IS NULL OR (p->>'truncated')::boolean IS DISTINCT FROM false THEN
   RETURN jsonb_build_object('outcome','BLOCKED','reason','Invalid or truncated FM request'); END IF;
  IF a IN ('reject_intervention','request_rework') AND length(btrim(coalesce(p->>'reason','')))<2 THEN

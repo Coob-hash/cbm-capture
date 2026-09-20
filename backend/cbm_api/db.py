@@ -20,6 +20,13 @@ _FUNCTIONS = {
     "claim_capture": "cbm_app.claim_capture(%s, %s)",
     "store_capture": "cbm_app.store_capture(%s, %s)",
     "reporter_reports": "cbm_app.reporter_reports(%s, %s)",
+    "fm_queue": "cbm_app.fm_queue(%s)",
+    "fm_decide": "cbm_app.fm_decide(%s)",
+    "fm_photo": "cbm_app.fm_photo(%s, %s)",
+    "technician_jobs": "cbm_app.technician_jobs(%s)",
+    "technician_respond": "cbm_app.technician_respond(%s)",
+    "technician_report_link": "cbm_app.technician_report_link(%s, %s)",
+    "set_technician_skills": "cbm_app.set_technician_skills(%s, %s)",
 }
 
 
