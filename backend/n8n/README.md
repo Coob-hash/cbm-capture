@@ -65,3 +65,24 @@ Before publishing, check the following:
 - The `CBM Postgres - Local Demo` credential is bound on the four new Postgres nodes. The import
   kept the binding by ID.
 - The Postgres Trigger holds one connection open while WF1 is published.
+
+
+## WF2: a report written in the app
+
+    python wf2_app_branch.py <wf2-export.json> <out.json> <release>/cbm/templates/technician-report/report-pdf.js
+    node test_wf2_app_branch.mjs <wf2-export.json> <out.json>
+
+The same shape as the WF1 branch: a notification (`cbm_app_report`), a one-minute sweep behind it,
+and a join at the node the rest of the workflow reads by name — here `Extract Ticket ID`, because
+`Download Report PDF` and `Extract Report Text and Photo` both ask it for their data.
+
+What is new is the document. The app sends the template's fields, never a PDF; `Render Report PDF`
+makes one with the template's own renderer (embedded by the script, so it is always the release's
+current version) and hands it to the extraction step exactly as the Drive download does. It needs
+`pdf-lib` in the JavaScript runner, allowed the way `pdf-parse` already is:
+`cbm/Dockerfile.runners`, `cbm/task-runners.json` and the `n8n` service's
+`NODE_FUNCTION_ALLOW_EXTERNAL` in the workflow release.
+
+`Record App Submission` then claims the report for its approval cycle through the workflows' own
+`cbm_claim_technician_report()`, so one cycle still takes exactly one report whichever route it came
+by, and writes the outcome back to `cbm_app.technician_reports`.

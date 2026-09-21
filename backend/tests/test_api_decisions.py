@@ -9,6 +9,9 @@ import json
 import os
 import uuid
 
+from fastapi.testclient import TestClient
+
+from cbm_api import internal
 from conftest import CODE, SITE, auth, device, new_email, sign_up
 from test_api_captures import jpeg, metadata, post
 
@@ -206,3 +209,100 @@ def test_the_reporter_photo_is_served_to_the_site_fm_only(client, owner):
     assert client.get(f"/v1/photos/{meta['capture_id']}", headers=auth(reporter_token)).status_code == 401
     assert client.get(f"/v1/photos/{uuid.uuid4()}", headers=auth(fm_token)).status_code == 404
     assert client.get(f"/v1/photos/{meta['capture_id']}").status_code == 401
+
+
+# ---- The technician's report, written in the app ------------------------------------------------
+
+def report_fields(**overrides) -> dict:
+    """The technician's half of the template. The locked half is read from the ticket."""
+    return {
+        "work_date": "2026-09-22",
+        "findings": "The seal was perished along the lower edge.",
+        "work_performed": "Replaced the seal, refitted the frame and checked that the sash closes flush.",
+        "materials": "1 x seal, 4 m",
+        "checks": "Poured water along the sill and watched for ten minutes.",
+        "check_result": "PASSED",
+        "outcome": "COMPLETED",
+        "remaining_issues": "None.",
+        "declaration": True,
+    } | overrides
+
+
+def assigned_ticket(owner, tech_id: int) -> int:
+    return ticket(owner, status="ASSIGNED", technician_id=tech_id, requires_dispatch_authorization=False,
+                  description="Window frame lets water in.", ifc_name="Window W-7", ifc_storey="Level 2")
+
+
+def send_report(client, token, ticket_id, fields, photo: bytes | None = None):
+    files = {"photo": ("after.jpg", photo, "image/jpeg")} if photo else None
+    return client.post(f"/v1/technician/jobs/{ticket_id}/report", headers=auth(token),
+                       data={"report": json.dumps(fields)}, files=files)
+
+
+def test_a_report_written_in_the_app_reaches_the_workflows(client, owner):
+    token, tech_id = technician(client, owner, dev=34)
+    tid = assigned_ticket(owner, tech_id)
+
+    r = send_report(client, token, tid, report_fields())
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "SENT"
+
+    row = owner.execute("SELECT status, report, photo_sha256 FROM cbm_app.technician_reports WHERE ticket_id=%s",
+                        [tid]).fetchone()
+    assert row[0] == "STORED" and row[2] is None
+    # The locked half is the ticket's and the account's, never the phone's.
+    assert row[1]["asset_name"] == "Window W-7" and row[1]["reported_issue"] == "Window frame lets water in."
+    assert row[1]["ticket_id"] == tid
+
+    # WF2 sees it, with everything it needs to render the document.
+    waiting = owner.execute("SELECT x FROM cbm_app.reports_for_wf2() x", []).fetchall()
+    offered = owner.execute("SELECT x FROM cbm_app.reports_for_wf2((SELECT id FROM cbm_app.technician_reports "
+                            "WHERE ticket_id=%s)) x", [tid]).fetchone()[0]
+    assert offered["source"] == "APP" and offered["ticket_id"] == tid
+    assert offered["report"]["work_performed"].startswith("Replaced the seal")
+    assert offered["photo"] is None
+    assert isinstance(waiting, list)
+
+    state = client.get(f"/v1/technician/jobs/{tid}/report", headers=auth(token)).json()
+    assert state["sent"] is True and state["state"] == "STORED"
+
+
+def test_a_report_may_carry_one_after_photo(client, owner):
+    token, tech_id = technician(client, owner, dev=35)
+    tid = assigned_ticket(owner, tech_id)
+    image = jpeg(1280, 960, os.urandom(1200))
+
+    r = send_report(client, token, tid, report_fields(photo_caption="The new seal in place"), photo=image)
+    assert r.status_code == 202, r.text
+    report_id = r.json()["report_id"]
+
+    row = owner.execute("SELECT status, storage_ref, photo_caption FROM cbm_app.technician_reports WHERE id=%s",
+                        [report_id]).fetchone()
+    assert row[0] == "STORED" and row[1] == f"report-{report_id}.jpg" and row[2] == "The new seal in place"
+
+    # WF2 fetches the photo from the internal service, as it fetches a reporter's capture.
+    with TestClient(internal.app) as svc:
+        got = svc.get(f"/internal/reports/{report_id}/photo")
+        assert got.status_code == 200 and got.content == image
+        assert svc.get(f"/internal/reports/{uuid.uuid4()}/photo").status_code == 404
+    assert client.get(f"/internal/reports/{report_id}/photo").status_code == 404
+
+
+def test_a_report_is_refused_unless_it_is_complete_and_the_job_is_theirs(client, owner):
+    token, tech_id = technician(client, owner, dev=36)
+    other, _ = technician(client, owner, dev=37)
+    tid = assigned_ticket(owner, tech_id)
+
+    assert send_report(client, other, tid, report_fields()).status_code == 404
+    assert send_report(client, token, tid, report_fields(work_performed="too short")).status_code == 422
+    assert send_report(client, token, tid, report_fields(declaration=False)).status_code == 422
+    assert send_report(client, token, tid, report_fields(check_result="MAYBE")).status_code == 422
+    assert send_report(client, token, tid, report_fields(work_date="22-09-2026")).status_code == 422
+    # A caption with no photo is a mistake, not a report.
+    assert send_report(client, token, tid, report_fields(photo_caption="the seal")).status_code == 422
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 0
+
+    assert send_report(client, token, tid, report_fields()).status_code == 202
+    # Sending the same report twice leaves one report, not two.
+    assert send_report(client, token, tid, report_fields()).status_code == 202
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 1

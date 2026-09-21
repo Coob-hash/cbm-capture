@@ -1,0 +1,230 @@
+"""Adds the CBM App branch to WF2, next to the Google Drive branch.
+
+    python wf2_app_branch.py <wf2-export.json> <output.json> <report-pdf.js>
+
+Input is an export of the running WF2 (n8n export:workflow) and the workflows' own PDF renderer,
+`cbm/templates/technician-report/report-pdf.js` from the workflow release. The renderer is embedded
+in the new Code node, so a report written in the app and one written in the browser are the same
+document; re-running this script re-embeds whatever the release now holds.
+
+  Completed Upload (Drive Trigger) ───────────────────────────────┐
+  App Report Submitted (LISTEN cbm_app_report) ─► Read App Report ─┤
+  App Report Sweep Tick ─► Sweep App Reports ─────────────────────┘
+                                                                   ▼
+                                                         Extract Ticket ID (shared)
+                                                           ─► Fetch Ticket ─► Ticket Open and Assigned?
+                                                           ─► App Report?
+                                                                ├ yes ─► Render Report PDF ─┐
+                                                                └ no  ─► Download Report PDF ┴► Extract Report Text and Photo
+                                                           … ─► Set Pending Approval ─► Claim App Report?
+                                                                ├ yes ─► Record App Submission ─┐
+                                                                └ no  ─────────────────────────┴► Approval Cycle
+
+The Drive branch is unchanged: a Drive file still parses its ticket number out of the file name,
+still downloads from Drive, and still skips the claim node. Deleting the Drive branch later means
+removing its trigger, 'Download Report PDF' and the Drive half of 'Extract Ticket ID'.
+
+Changed nodes: 'Extract Ticket ID' only. Everything after the extraction — the assessment, the FM
+review loop, the IFC write, the closure and the notices — is untouched.
+"""
+
+import json
+import sys
+import uuid
+
+PG_CREDENTIAL = {"postgres": {"id": "cbmLocalPg20260917", "name": "CBM Postgres - Local Demo"}}
+INTERNAL_PHOTO_URL = "http://cbm-app-internal:8081/internal/reports/"
+NEW_NODES = ("App Report Submitted", "Read App Report", "App Report Sweep Tick", "Sweep App Reports",
+             "App Report?", "Render Report PDF", "Claim App Report?", "Record App Submission")
+
+# The one line of the Drive branch that is replaced, and what replaces it.
+EXTRACT_TICKET_LINE = "const f=$input.first().json,name=String(f.name||'');"
+EXTRACT_TICKET_APP = r"""const f=$input.first().json;
+// App branch: a report written in the CBM App (cbm_app.reports_for_wf2). It carries its own ticket,
+// so there is no file name to read it out of, and the fields travel with it for the renderer.
+const app=f.report&&f.report.source==='APP'?f.report:null;
+if(app){
+ if(!Number.isInteger(app.ticket_id)||app.ticket_id<1)throw new Error('App report without a ticket');
+ if(!app.report_id)throw new Error('App report without an id');
+ return [{json:{matched:true,ticket_id:app.ticket_id,upload_kind:'REPORT',source:'APP',
+  app_report:app,report_file_id:null,report_file_name:'TICKET-'+app.ticket_id+'.pdf',report_link:''}}];
+}
+// Drive branch, unchanged from here down.
+const name=String(f.name||'');"""
+
+
+def render_code(renderer_source: str) -> str:
+    """The Code node: the template's renderer, the AFTER photo, and the PDF it produces."""
+    return (
+        "// The technician wrote this report in the app, so the PDF does not exist yet. It is made\n"
+        "// here with the template's own renderer — the same file the browser form loads — so both\n"
+        "// routes produce the same document for the facility manager and for the archive.\n"
+        "globalThis.PDFLib = require('pdf-lib');\n"
+        "const crypto = require('crypto');\n"
+        "\n"
+        "// ---- cbm/templates/technician-report/report-pdf.js (embedded verbatim) ----\n"
+        f"{renderer_source.rstrip()}\n"
+        "// ---- end of the renderer ----\n"
+        "\n"
+        "const app = $('Extract Ticket ID').first().json.app_report;\n"
+        "if (!app) throw new Error('Not a report from the app');\n"
+        "const fields = Object.assign({}, app.report, {photo_caption: app.photo ? app.photo.caption : ''});\n"
+        "let photoDataUrl = null;\n"
+        "if (app.photo) {\n"
+        "  const bytes = await this.helpers.httpRequest({\n"
+        f"    method: 'GET', url: '{INTERNAL_PHOTO_URL}' + app.report_id + '/photo',\n"
+        "    encoding: 'arraybuffer', timeout: 30000,\n"
+        "  });\n"
+        "  photoDataUrl = 'data:image/jpeg;base64,' + Buffer.from(bytes).toString('base64');\n"
+        "}\n"
+        "const pdf = Buffer.from(await globalThis.CBMReport.createReport(fields, photoDataUrl, false));\n"
+        "if (pdf.subarray(0, 5).toString() !== '%PDF-') throw new Error('The renderer did not produce a PDF');\n"
+        "const sha256 = crypto.createHash('sha256').update(pdf).digest('hex');\n"
+        "return [{\n"
+        "  json: {app_report_id: app.report_id, ticket_id: app.ticket_id, pdf_sha256: sha256, pdf_bytes: pdf.length},\n"
+        "  binary: {data: await this.helpers.prepareBinaryData(pdf, 'TICKET-' + app.ticket_id + '.pdf', 'application/pdf')},\n"
+        "}];\n"
+    )
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"WF2 is not what this patch expects: {message}")
+
+
+def patch(wf: dict, renderer_source: str) -> dict:
+    nodes = {n["name"]: n for n in wf["nodes"]}
+    conns = wf.setdefault("connections", {})
+
+    for name in NEW_NODES:
+        if name in nodes:
+            fail(f"'{name}' already exists; the branch has been added before")
+    for name in ("Completed Upload (Drive Trigger)", "Extract Ticket ID", "Fetch Ticket",
+                 "Ticket Open and Assigned?", "Download Report PDF", "Extract Report Text and Photo",
+                 "Set Pending Approval", "Approval Cycle"):
+        if name not in nodes:
+            fail(f"'{name}' is missing")
+
+    def main_targets(name, output=0):
+        branches = conns.get(name, {}).get("main", [])
+        return [t["node"] for t in (branches[output] if len(branches) > output else [])]
+
+    if main_targets("Ticket Open and Assigned?") != ["Download Report PDF"]:
+        fail("Ticket Open and Assigned? no longer feeds Download Report PDF")
+    if main_targets("Download Report PDF") != ["Extract Report Text and Photo"]:
+        fail("Download Report PDF no longer feeds the extraction")
+    if main_targets("Set Pending Approval") != ["Approval Cycle"]:
+        fail("Set Pending Approval no longer feeds Approval Cycle")
+    if "root.CBMReport" not in renderer_source or "createReport" not in renderer_source:
+        fail("that file is not the report renderer")
+
+    def pos(name, dx, dy):
+        x, y = nodes[name]["position"]
+        return [x + dx, y + dy]
+
+    def node(name, type_, version, position, parameters, **extra):
+        n = {"parameters": parameters, "id": str(uuid.uuid4()), "name": name, "type": type_,
+             "typeVersion": version, "position": position, **extra}
+        wf["nodes"].append(n)
+        nodes[name] = n
+        return n
+
+    def link(src, dst, output=0):
+        outs = conns.setdefault(src, {}).setdefault("main", [])
+        while len(outs) <= output:
+            outs.append([])
+        outs[output].append({"node": dst, "type": "main", "index": 0})
+
+    def when_app(label):
+        """True when this run came from the app, read from the node both branches pass through."""
+        return {"conditions": {"options": {"caseSensitive": True, "leftValue": "",
+                                           "typeValidation": "strict", "version": 1},
+                               "combinator": "and",
+                               "conditions": [{"id": str(uuid.uuid4()),
+                                               "leftValue": "={{ $('Extract Ticket ID').first().json.source === 'APP' }}",
+                                               "rightValue": True,
+                                               "operator": {"type": "boolean", "operation": "true",
+                                                            "singleValue": True}}]},
+                "options": {}, "notes": label}
+
+    # 1. How WF2 hears about a report written in the app: a notification, and a sweep behind it.
+    node("App Report Submitted", "n8n-nodes-base.postgresTrigger", 1,
+         pos("Completed Upload (Drive Trigger)", 0, 260),
+         {"triggerMode": "listenTrigger", "channelName": "cbm_app_report", "options": {}},
+         credentials=PG_CREDENTIAL,
+         notes="cbm_app.store_technician_report() sends NOTIFY cbm_app_report with the report id once the app has stored it.")
+    node("Read App Report", "n8n-nodes-base.postgres", 2.5,
+         pos("Completed Upload (Drive Trigger)", 220, 260),
+         {"operation": "executeQuery",
+          "query": "SELECT x AS report FROM cbm_app.reports_for_wf2($1::uuid) x;",
+          "options": {"queryBatching": "independently",
+                      "queryReplacement": "={{ [String($json.payload || '')] }}"}},
+         credentials=PG_CREDENTIAL,
+         notes="Returns the report only while it still waits for WF2, so a late or repeated notification does nothing.")
+    node("App Report Sweep Tick", "n8n-nodes-base.scheduleTrigger", 1.2,
+         pos("Completed Upload (Drive Trigger)", 0, 440),
+         {"rule": {"interval": [{"field": "minutes", "minutesInterval": 1}]}},
+         notes="The safety net behind the notification: WF2 has no other tick of its own.")
+    node("Sweep App Reports", "n8n-nodes-base.postgres", 2.5,
+         pos("Completed Upload (Drive Trigger)", 220, 440),
+         {"operation": "executeQuery",
+          "query": "SELECT x AS report FROM cbm_app.reports_for_wf2() x;",
+          "options": {}},
+         credentials=PG_CREDENTIAL,
+         notes="Reports the notification missed (stored over two minutes ago) and ones WF2 left unfinished, retried after ten.")
+    link("App Report Submitted", "Read App Report")
+    link("App Report Sweep Tick", "Sweep App Reports")
+    link("Read App Report", "Extract Ticket ID")
+    link("Sweep App Reports", "Extract Ticket ID")
+
+    # 2. Extract Ticket ID: the shared node, because two nodes after it read it by name.
+    eti = nodes["Extract Ticket ID"]["parameters"]
+    if eti.get("jsCode", "").count(EXTRACT_TICKET_LINE) != 1:
+        fail("Extract Ticket ID code changed; review before patching")
+    eti["jsCode"] = eti["jsCode"].replace(EXTRACT_TICKET_LINE, EXTRACT_TICKET_APP, 1)
+
+    # 3. Where the PDF comes from: Drive, or the renderer.
+    node("App Report?", "n8n-nodes-base.if", 2.2, pos("Download Report PDF", 0, -200),
+         when_app("A report written in the app has no Drive file: it is rendered instead."))
+    conns["Ticket Open and Assigned?"]["main"][0] = []
+    link("Ticket Open and Assigned?", "App Report?", 0)
+    node("Render Report PDF", "n8n-nodes-base.code", 2, pos("Download Report PDF", 220, -200),
+         {"jsCode": render_code(renderer_source)},
+         notes="The template's own renderer, with the AFTER photo fetched from the App API's internal service.")
+    link("App Report?", "Render Report PDF", 0)
+    link("App Report?", "Download Report PDF", 1)
+    link("Render Report PDF", "Extract Report Text and Photo")
+
+    # 4. Claim the report through the workflows' own submission function, and record the outcome.
+    node("Claim App Report?", "n8n-nodes-base.if", 2.2, pos("Set Pending Approval", 200, 0),
+         when_app("Only a report from the app is claimed here; the portal claims its own."))
+    node("Record App Submission", "n8n-nodes-base.postgres", 2.5, pos("Set Pending Approval", 420, -160),
+         {"operation": "executeQuery",
+          "query": "SELECT cbm_app.record_app_report_submission($1::jsonb) AS result;",
+          "options": {"queryBatching": "independently",
+                      "queryReplacement": "={{ [JSON.stringify({report_id: $('Render Report PDF').first().json.app_report_id, "
+                                          "pdf_sha256: $('Render Report PDF').first().json.pdf_sha256})] }}"}},
+         credentials=PG_CREDENTIAL,
+         notes="Claims the report for this approval cycle through public.cbm_claim_technician_report() and records the outcome on the app's row.")
+    conns["Set Pending Approval"]["main"][0] = []
+    link("Set Pending Approval", "Claim App Report?")
+    link("Claim App Report?", "Record App Submission", 0)
+    link("Claim App Report?", "Approval Cycle", 1)
+    link("Record App Submission", "Approval Cycle")
+    return wf
+
+
+def main():
+    if len(sys.argv) != 4:
+        raise SystemExit(__doc__)
+    src, dst, renderer = sys.argv[1], sys.argv[2], sys.argv[3]
+    data = json.load(open(src, encoding="utf-8"))
+    wf = data[0] if isinstance(data, list) else data
+    before = len(wf["nodes"])
+    out = patch(wf, open(renderer, encoding="utf-8").read())
+    json.dump([out] if isinstance(data, list) else out, open(dst, "w", encoding="utf-8"),
+              ensure_ascii=False, indent=2)
+    print(f"{dst}: {before} -> {len(out['nodes'])} nodes")
+
+
+if __name__ == "__main__":
+    main()

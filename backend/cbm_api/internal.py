@@ -9,7 +9,7 @@ import os
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
-from .captures import path_for
+from .captures import path_for, report_path_for
 
 CAPTURE_DIR = os.environ.get("CBM_APP_CAPTURE_DIR", "/data/captures")
 
@@ -24,6 +24,15 @@ def healthz():
 @app.get("/internal/captures/{capture_id}/image")
 def capture_image(capture_id: str):
     path = path_for(CAPTURE_DIR, capture_id)
+    if path is None or not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "NOT_FOUND", "message": "No stored image."})
+    return FileResponse(path, media_type="image/jpeg", filename=path.name)
+
+
+@app.get("/internal/reports/{report_id}/photo")
+def report_photo(report_id: str):
+    """The AFTER photo of a technician's report, for WF2's renderer."""
+    path = report_path_for(CAPTURE_DIR, report_id)
     if path is None or not path.is_file():
         return JSONResponse(status_code=404, content={"error": "NOT_FOUND", "message": "No stored image."})
     return FileResponse(path, media_type="image/jpeg", filename=path.name)

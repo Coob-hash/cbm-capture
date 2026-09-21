@@ -12,7 +12,7 @@ _HTTP = {
     "INVALID_ROLE": 422, "INVALID_EMAIL": 422, "WEAK_PASSWORD": 422, "INVALID_DEVICE": 422,
     "INVALID_SITE_CODE": 422, "INVALID": 422, "SITE_MISMATCH": 422,
     "ACCOUNT_EXISTS": 409, "ALREADY_BOUND": 409, "CONFLICT": 409,
-    "BLOCKED": 409, "OFFER_GONE": 409, "REASON_REQUIRED": 422,
+    "BLOCKED": 409, "OFFER_GONE": 409, "REASON_REQUIRED": 422, "INVALID_REPORT": 422,
     "INVALID_CREDENTIALS": 401, "INVALID_GOOGLE_IDENTITY": 401, "UNAUTHENTICATED": 401,
     "LOCKED": 429,
     "DISABLED": 403, "FORBIDDEN": 403,
@@ -41,6 +41,7 @@ _MESSAGES = {
     "BLOCKED": "This ticket has moved on. Open it again to see where it stands.",
     "OFFER_GONE": "This offer is no longer open.",
     "REASON_REQUIRED": "Say why, in a few words.",
+    "INVALID_REPORT": "The report is not complete. Check the dates, the answers and the confirmation.",
 }
 
 

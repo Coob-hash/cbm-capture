@@ -27,6 +27,9 @@ _FUNCTIONS = {
     "technician_respond": "cbm_app.technician_respond(%s)",
     "technician_report_link": "cbm_app.technician_report_link(%s, %s)",
     "set_technician_skills": "cbm_app.set_technician_skills(%s, %s)",
+    "submit_technician_report": "cbm_app.submit_technician_report(%s)",
+    "store_technician_report": "cbm_app.store_technician_report(%s, %s)",
+    "my_report_state": "cbm_app.my_report_state(%s, %s)",
 }
 
 

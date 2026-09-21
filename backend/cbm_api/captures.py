@@ -66,9 +66,16 @@ def path_for(capture_dir: str, capture_id: str) -> Path | None:
     return Path(capture_dir) / f"app-{capture_id}.jpg"
 
 
-def store(capture_dir: str, capture_id: str, data: bytes) -> None:
+def report_path_for(capture_dir: str, report_id: str) -> Path | None:
+    """The AFTER photo of a technician's report, in the same store as the reporters' photos."""
+    if not _UUID.match(report_id or ""):
+        return None
+    return Path(capture_dir) / f"report-{report_id}.jpg"
+
+
+def store(capture_dir: str, capture_id: str, data: bytes, target: Path | None = None) -> None:
     """Write atomically: a crash leaves either no file or the whole file, never a partial image."""
-    target = path_for(capture_dir, capture_id)
+    target = target or path_for(capture_dir, capture_id)
     if target is None:
         raise ImageError("INVALID", "Invalid capture id.")
     target.parent.mkdir(parents=True, exist_ok=True)

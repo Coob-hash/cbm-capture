@@ -15,6 +15,7 @@ run on top of the same PostgreSQL database (schema `public`) and never receive c
 |---|---|
 | `migrations/001_app_schema.sql` | Schema `cbm_app`: sites, accounts, roles, sessions, devices, reports, photos, and every function. Repeatable. |
 | `migrations/002_api_role.sql` | The API's login `cbm_app_api`: no table privileges, `EXECUTE` on the entry functions only. |
+| `migrations/004_technician_reports.sql` | The technician's report, written in the app: the template's fields and an optional AFTER photo. WF2 renders the document from them. |
 | `migrations/003_decisions.sql` | What the FM and the technician decide from the phone. No second decision path: it authenticates, checks the site, and calls the workflows' own guarded functions. |
 | `cbm_api/` | FastAPI service: HTTP, Google token verification, rate and size limits. |
 | `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`, `test_api_decisions.py`), `run-tests.sh`. |
@@ -69,7 +70,9 @@ for).
 | GET | `/v1/technician/jobs` | Bearer (technician) | Offers to answer, jobs in hand, work completed, own skills |
 | POST | `/v1/technician/offers` | Bearer (technician) | Accept or decline an offer. `409 OFFER_GONE` when it expired or was answered |
 | POST | `/v1/technician/skills` | Bearer (technician) | Their own skills, from the listed vocabulary. Nobody else sets them |
-| GET | `/v1/technician/jobs/{id}/report-link` | Bearer (technician) | A link to the workflows' report template for a job of theirs |
+| POST | `/v1/technician/jobs/{id}/report` | Bearer (technician) | The work report: multipart `report` (the template's fields) and an optional `photo` (JPEG). The document is rendered by WF2, not here |
+| GET | `/v1/technician/jobs/{id}/report` | Bearer (technician) | Whether this job's report has already been written |
+| GET | `/v1/technician/jobs/{id}/report-link` | Bearer (technician) | A link to the workflows' report template, kept for the browser route |
 
 The internal image service (`cbm_api.internal`, container `api-internal`, alias
 `cbm-app-internal:8081`, **no published port**) serves `GET /internal/captures/{id}/image` to

@@ -8,6 +8,7 @@ lives in the database functions. This layer adds what a database cannot: HTTP, G
 verification, request-size and per-address rate limits, and never echoing a request body.
 """
 
+import hashlib
 import json
 import threading
 import time
@@ -118,6 +119,25 @@ class Skills(Strict):
     skills: list[str] = Field(min_length=1, max_length=10)
 
 
+CheckResult = Literal["PASSED", "FAILED", "NOT_PERFORMED"]
+Outcome = Literal["COMPLETED", "PARTIAL", "NOT_COMPLETED"]
+
+
+class ReportFields(Strict):
+    """The technician's half of the report template. The locked half — ticket, asset, location,
+    who they are — is read from the ticket and the account, never taken from the phone."""
+    work_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    findings: str = Field(min_length=1, max_length=3000)
+    work_performed: str = Field(min_length=20, max_length=6000)
+    materials: str = Field(default="", max_length=2000)
+    checks: str = Field(min_length=1, max_length=4000)
+    check_result: CheckResult
+    outcome: Outcome
+    remaining_issues: str = Field(min_length=1, max_length=4000)
+    declaration: bool
+    photo_caption: str | None = Field(default=None, max_length=500)
+
+
 # ---- Cross-cutting guards ----------------------------------------------------------------------
 
 @app.exception_handler(StarletteHTTPException)
@@ -137,7 +157,8 @@ async def validation_error(_: Request, exc: RequestValidationError):
 @app.middleware("http")
 async def limit_body(request: Request, call_next):
     length = request.headers.get("content-length")
-    limit = settings.max_capture_bytes + 128 * 1024 if request.url.path == "/v1/captures" else settings.max_body_bytes
+    large = request.url.path == "/v1/captures" or request.url.path.endswith("/report")
+    limit = settings.max_capture_bytes + 128 * 1024 if large else settings.max_body_bytes
     if length is not None and (not length.isdigit() or int(length) > limit):
         return JSONResponse(status_code=413, content={"error": "TOO_LARGE", "message": "Request too large."})
     if length is None and request.method in ("POST", "PUT", "PATCH"):
@@ -360,6 +381,57 @@ def technician_skills(body: Skills, token: Annotated[str, Depends(bearer)]):
     if result is not None and result.get("status") == "INVALID":
         fail("INVALID", http=422, message="Choose from the listed skills.")
     return {"skills": check(result)["skills"]}
+
+
+@app.post("/v1/technician/jobs/{ticket_id}/report", status_code=202)
+def submit_report(ticket_id: int,
+                  token: Annotated[str, Depends(bearer)],
+                  report: Annotated[str, Form(max_length=32 * 1024)],
+                  photo: Annotated[UploadFile | None, File()] = None):
+    """The work report, written in the app: the template's fields and an optional AFTER photo.
+
+    The PDF is not made here. WF2 renders it with the template's own renderer, so a report written
+    in the app and one written in the browser are the same document, and claims it through the
+    workflows' existing submission function.
+    """
+    if not 1 <= ticket_id <= 999_999_999:
+        fail("NOT_FOUND")
+    try:
+        fields = ReportFields.model_validate_json(report)
+    except ValueError:
+        fail("INVALID_REPORT", http=422)
+    if not fields.declaration:
+        fail("INVALID_REPORT", http=422, message="Confirm the declaration before sending the report.")
+
+    data = photo.file.read(settings.max_capture_bytes + 1) if photo is not None else b""
+    payload: dict = {"token": token, "ticket_id": ticket_id,
+                     "report": fields.model_dump(mode="json", exclude={"photo_caption"})}
+    if data:
+        if len(data) > settings.max_capture_bytes:
+            fail("TOO_LARGE", http=413, message="The photo is too large.")
+        if captures.jpeg_size(data) is None:
+            fail("NOT_A_JPEG", http=422, message="The photo must be a JPEG.")
+        payload["photo"] = {"caption": fields.photo_caption, "bytes": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest()}
+    elif fields.photo_caption:
+        fail("INVALID_REPORT", http=422, message="There is a caption but no photo.")
+
+    claim = check(db.call("submit_technician_report", payload), ok="UPLOAD" if data else "STORED")
+    if not data:
+        return {"report_id": claim["report_id"], "status": "SENT"}
+    if claim.get("already_sent"):
+        return {"report_id": claim["report_id"], "status": "SENT"}
+    path = captures.report_path_for(settings.capture_dir, claim["report_id"])
+    captures.store(settings.capture_dir, claim["report_id"], data, target=path)
+    stored = check(db.call("store_technician_report", token, {"report_id": claim["report_id"]}), ok="STORED")
+    return {"report_id": stored["report_id"], "status": "SENT"}
+
+
+@app.get("/v1/technician/jobs/{ticket_id}/report")
+def report_state(ticket_id: int, token: Annotated[str, Depends(bearer)]):
+    """Whether this job's report has already been written, so the form is not filled twice."""
+    result = check(db.call("my_report_state", token, ticket_id))
+    return {k: result[k] for k in ("sent", "state", "at") if k in result}
 
 
 @app.get("/v1/technician/jobs/{ticket_id}/report-link")

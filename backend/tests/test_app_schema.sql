@@ -379,7 +379,112 @@ DO $$ DECLARE q jsonb; c jsonb; r jsonb; tid int:=pg_temp.get('ticket')::int; BE
  ASSERT r->>'status'='BLOCKED', 'an opposite decision is refused: '||r;
 END $$;
 
--- 13. The API's login reaches data only through its entry functions --------------------------------
+-- 13. The technician's report, written in the app ------------------------------------------------
+-- The fields of the workflows' template go to the database; WF2 renders the PDF from them.
+CREATE OR REPLACE FUNCTION pg_temp.report_fields() RETURNS jsonb LANGUAGE sql AS $f$
+ SELECT jsonb_build_object(
+  'work_date','2026-09-22','findings','The seal was perished along the lower edge.',
+  'work_performed','Replaced the seal, refitted the frame and checked that the sash closes flush.',
+  'materials','1 x seal, 4 m','checks','Poured water along the sill and watched for ten minutes.',
+  'check_result','PASSED','outcome','COMPLETED','remaining_issues','None.','declaration',true)
+$f$;
+
+-- WF2 sent the job back in section 12, so it is the technician's again.
+DO $$ BEGIN UPDATE public.tickets SET status='ASSIGNED' WHERE id=pg_temp.get('ticket')::int; END $$;
+DO $$ DECLARE r jsonb; tid int:=pg_temp.get('ticket')::int; tech int:=pg_temp.get('tech_id')::int; BEGIN
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('fm'),'ticket_id',tid,
+   'report',pg_temp.report_fields()))->>'status'='UNAUTHENTICATED', 'only a technician writes a report';
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',999999,
+   'report',pg_temp.report_fields()))->>'status'='NOT_FOUND', 'not their ticket';
+
+ -- What the template requires.
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"work_performed":"too short"}'))->>'status'='INVALID_REPORT', 'work performed has a minimum';
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"declaration":false}'))->>'status'='INVALID_REPORT', 'the declaration is required';
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"check_result":"MAYBE"}'))->>'status'='INVALID_REPORT', 'the check result is one of three';
+ ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.technician_reports), 'nothing was written by a refused report';
+
+ -- With a photo the API is told to upload it; the report is not visible to WF2 until it has.
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields(),
+   'photo',jsonb_build_object('caption','The new seal in place','sha256',repeat('d',64),'bytes',120000)));
+ ASSERT r->>'status'='UPLOAD' AND r->>'report_id' IS NOT NULL, 'a photo is uploaded next: '||r;
+ PERFORM pg_temp.put('report',r->>'report_id');
+ ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.reports_for_wf2()), 'not offered to WF2 before the photo is stored';
+ ASSERT (SELECT status FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid)='RECEIVED', 'waiting for the photo';
+
+ -- The locked half comes from the ticket and the account, never from the phone.
+ ASSERT (SELECT report->>'technician_name' FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid)='Tina Tech',
+  'the technician is read from the account';
+ ASSERT (SELECT report->>'ticket_id' FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid)=tid::text,
+  'the ticket is the one being reported on';
+ ASSERT (SELECT report->>'reported_issue' FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid)='Door handle detached',
+  'the reported issue comes from the ticket';
+
+ -- Repeating the same submission answers with the same report instead of writing a second one.
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields(),
+   'photo',jsonb_build_object('caption','again','sha256',repeat('d',64),'bytes',120000)));
+ ASSERT r->>'report_id'=pg_temp.get('report'), 'the same report comes back';
+ ASSERT (SELECT count(*) FROM cbm_app.technician_reports)=1, 'one report, not two';
+END $$;
+
+DO $$ DECLARE r jsonb; item jsonb; rid uuid:=pg_temp.get('report')::uuid; tid int:=pg_temp.get('ticket')::int; BEGIN
+ -- Once the photo is on disk the report is WF2's to take.
+ r := cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid));
+ ASSERT r->>'status'='STORED' AND (r->>'ticket_id')::int=tid, 'stored: '||r;
+ ASSERT (SELECT storage_ref FROM cbm_app.technician_reports WHERE id=rid)='report-'||rid::text||'.jpg', 'the photo has a place in the store';
+ ASSERT cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid))->>'status'='STORED', 'storing twice is harmless';
+
+ -- WF2 by notification: it reads the report by id.
+ SELECT x INTO item FROM cbm_app.reports_for_wf2(rid) x;
+ ASSERT item->>'source'='APP' AND (item->>'ticket_id')::int=tid, 'the shape WF2 reads: '||item;
+ ASSERT item#>>'{report,work_performed}' LIKE 'Replaced the seal%', 'the fields travel with it';
+ ASSERT item#>>'{photo,caption}'='The new seal in place' AND item#>>'{photo,storage_ref}'='report-'||rid::text||'.jpg',
+  'the AFTER photo travels with it';
+ -- The sweep leaves a fresh report to the notification, and picks up a missed one.
+ ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.reports_for_wf2()), 'fresh reports are left to the notification';
+ UPDATE cbm_app.technician_reports SET stored_at=stored_at-interval '3 minutes' WHERE id=rid;
+ ASSERT (SELECT x->>'report_id' FROM cbm_app.reports_for_wf2() x)=rid::text, 'the sweep picks up a missed report';
+
+ -- WF2 writes back what it made of it.
+ PERFORM cbm_app.record_report_intake(jsonb_build_object('report_id',rid,'submission_id',gen_random_uuid(),'outcome','SUBMITTED'));
+ ASSERT (SELECT status FROM cbm_app.technician_reports WHERE id=rid)='SUBMITTED', 'the report is with the workflows';
+ ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.reports_for_wf2()), 'a claimed report is not offered again';
+ ASSERT (SELECT submission_id FROM cbm_app.technician_reports WHERE id=rid) IS NOT NULL, 'the workflows own submission is recorded';
+
+ -- The technician sees that it has been sent, and may write again after a rework.
+ r := cbm_app.my_report_state(pg_temp.get('tech'),tid);
+ ASSERT (r->>'sent')::boolean AND r->>'state'='SUBMITTED', 'the app knows it was sent: '||r;
+ ASSERT NOT (cbm_app.my_report_state(pg_temp.get('tech'),999999)->>'sent')::boolean, 'another ticket has no report';
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"findings":"Sent back: the corner still lets water in."}'));
+ ASSERT r->>'status'='STORED', 'a second report may be written once the first is with the workflows: '||r;
+ ASSERT (SELECT count(*) FROM cbm_app.technician_reports)=2, 'two reports, one per round';
+END $$;
+
+
+-- WF2 renders the PDF, then claims the report through the workflows' own submission function.
+DO $$ DECLARE r jsonb; rid uuid; tid int:=pg_temp.get('ticket')::int; BEGIN
+ SELECT id INTO rid FROM cbm_app.technician_reports WHERE status='STORED' ORDER BY created_at DESC LIMIT 1;
+ ASSERT rid IS NOT NULL, 'fixture: a report is waiting for WF2';
+ ASSERT cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256','nope'))->>'status'='INVALID',
+  'the PDF hash is checked';
+ r := cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)));
+ ASSERT r->>'status'='SUBMITTED' AND r->>'submission_id' IS NOT NULL, 'claimed through the workflows: '||r;
+ ASSERT (SELECT status FROM cbm_app.technician_reports WHERE id=rid)='SUBMITTED', 'and recorded here';
+ ASSERT (SELECT pdf_sha256 FROM public.cbm_technician_submissions WHERE id=(r->>'submission_id')::uuid)=repeat('e',64),
+  'the workflows hold the report and its hash';
+ ASSERT (SELECT report->>'work_performed' FROM public.cbm_technician_submissions WHERE id=(r->>'submission_id')::uuid) IS NOT NULL,
+  'with the fields the technician wrote';
+ -- One approval cycle takes one report: a second claim is refused, and said to be refused.
+ ASSERT cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)))->>'status'='SUBMITTED',
+  'claiming twice answers with the first claim';
+END $$;
+
+-- 14. The API's login reaches data only through its entry functions --------------------------------
 DO $$ BEGIN
  ASSERT cbm_app.store_capture(pg_temp.get('tech'),jsonb_build_object('capture_id','11111111-1111-4111-8111-111111111111'))->>'status'='UNAUTHENTICATED', 'store needs a reporter session';
 END $$;
