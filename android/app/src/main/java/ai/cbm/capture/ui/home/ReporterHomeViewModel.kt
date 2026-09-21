@@ -73,7 +73,7 @@ class ReporterHomeViewModel @Inject constructor(
                 when {
                     r.isSuccessful -> { server.value = r.body()?.reports.orEmpty(); error.value = null }
                     r.code() == 401 -> store.clear()   // the navigation returns to the login screen
-                    else -> error.value = "Could not load your reports (HTTP ${r.code()})."
+                    else -> error.value = "Could not load your reports. Pull down to try again."
                 }
             } catch (e: IOException) {
                 error.value = NETWORK_MESSAGE

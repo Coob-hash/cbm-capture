@@ -111,3 +111,46 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
 }
+
+// The words on a screen are written for the person holding the phone. This fails the build when a
+// string in a UI file names something only we know: a requirements document, a workflow, a table,
+// a protocol, a status code, or the lens arithmetic. Comments are exempt — they are for us — and so
+// are ALL_CAPS wire constants, which are values the server sends, not sentences.
+val checkVisibleTextIsPlain by tasks.registering {
+    val uiSources = files(
+        fileTree("src/main/java/ai/cbm/capture/ui") { include("**/*.kt") },
+        fileTree("../shared/src/commonMain/kotlin/ai/cbm/capture/ui") { include("**/*.kt") },
+    )
+    inputs.files(uiSources)
+    doLast {
+        val jargon = Regex(
+            """\b(PRD|WF\d|workflow|workflows|guarded|dispatcher|intake|outbox|jsonb|webhook|""" +
+                """endpoint|HTTP|ARCore|Camera2|EXIF|intrinsics|bearer|payload|n8n|Drive folder)\b|""" +
+                """\u00A7|\b[QTRF]-?\d+\b""",
+            RegexOption.IGNORE_CASE
+        )
+        val wireConstant = Regex("""^[A-Z0-9_]+$""")
+        val keepLines = { m: MatchResult -> "\n".repeat(m.value.count { it == '\n' }) }
+        val offenders = uiSources.files.sorted().flatMap { file ->
+            file.readText()
+                .replace(Regex("""/\*[\s\S]*?\*/"""), keepLines)
+                .replace(Regex("""//[^\n]*"""), "")
+                .lines()
+                .mapIndexedNotNull { i, line ->
+                    val bad = Regex("\"([^\"\\\\\\n]{4,})\"").findAll(line)
+                        .map { it.groupValues[1] }
+                        .filterNot { wireConstant.matches(it) }
+                        .filter { jargon.containsMatchIn(it) }
+                        .toList()
+                    if (bad.isEmpty()) null else "${file.name}:${i + 1}: ${bad.joinToString(" | ")}"
+                }
+        }
+        if (offenders.isNotEmpty()) {
+            throw GradleException(
+                "These words are ours, not the reader's. Rewrite them for the person on the screen:\n" +
+                    offenders.joinToString("\n")
+            )
+        }
+    }
+}
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkVisibleTextIsPlain) }

@@ -236,9 +236,9 @@ private fun ArCameraPreview(
 @Composable
 private fun CalibrationBadge(state: TrackingState) {
     val text = when (state) {
-        TrackingState.NORMAL -> "Calibrated"
-        TrackingState.LIMITED -> "Steadying"
-        TrackingState.NOT_AVAILABLE -> "Starting"
+        TrackingState.NORMAL -> "Ready"
+        TrackingState.LIMITED -> "Hold steady"
+        TrackingState.NOT_AVAILABLE -> "Starting the camera"
     }
     Surface(shape = CircleShape, tonalElevation = 3.dp) {
         Text(text, Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)

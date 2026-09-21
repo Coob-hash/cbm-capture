@@ -50,7 +50,7 @@ class CaptureUploader @Inject constructor(
                     409 -> UploadOutcome.PermanentFailure(r.apiError(json).message ?: "This photo was already sent differently.")
                     413 -> UploadOutcome.PermanentFailure("The photo is larger than the server accepts.")
                     400, 422 -> r.apiError(json).let { UploadOutcome.PermanentFailure(rejection(it.error, it.message)) }
-                    else -> UploadOutcome.TransientFailure("The server is unavailable (HTTP ${r.code()}).")
+                    else -> UploadOutcome.TransientFailure("The office system is not answering. It will be sent later.")
                 }
             } catch (e: IOException) {
                 // Offline, timed out, or dropped mid-body: all worth retrying.

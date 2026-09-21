@@ -11,6 +11,7 @@ import ai.cbm.capture.domain.repository.CaptureRepository
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.lifecycle.SavedStateHandle
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.ar.core.Session
@@ -117,7 +118,8 @@ class CaptureViewModel @Inject constructor(
         viewModelScope.launch {
             val snapshotResult = controller.capture(normalizedX, normalizedY)
             val snapshot = snapshotResult.getOrElse { error ->
-                _phase.value = Phase.Failed(error.message ?: "The camera frame could not be read.")
+                Log.w(TAG, "The camera frame could not be read", error)
+                _phase.value = Phase.Failed("The camera did not give a usable picture. Try again.")
                 return@launch
             }
 
@@ -157,7 +159,8 @@ class CaptureViewModel @Inject constructor(
                     )
                 )
             }.onFailure { error ->
-                _phase.value = Phase.Failed(error.message ?: "The photo could not be prepared.")
+                Log.w(TAG, "The photo could not be prepared", error)
+                _phase.value = Phase.Failed("That photo could not be prepared. Take it again.")
             }
         }
     }
@@ -223,3 +226,5 @@ class CaptureViewModel @Inject constructor(
         const val REPORT_ID_ARG = "reportId"
     }
 }
+
+private const val TAG = "CbmCapture"

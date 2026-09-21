@@ -100,8 +100,6 @@ fun ReviewSheet(
                 maxLines = 5
             )
 
-            TechnicalDetails(preview)
-
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -139,23 +137,3 @@ private fun MarkedPhoto(preview: CaptureViewModel.ReviewPreview) {
     }
 }
 
-@Composable
-private fun TechnicalDetails(preview: CaptureViewModel.ReviewPreview) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Technical details", style = MaterialTheme.typography.titleSmall)
-        DetailRow("Calibration", preview.intrinsicsSource.displayName)
-        DetailRow("Trusted", if (preview.intrinsicsTrusted) "Yes" else "No")
-        DetailRow("Image", "${preview.width} x ${preview.height} px")
-        DetailRow("Focal length", "%.1f px".format(preview.focalLength))
-        DetailRow("Target pixel", "%.0f, %.0f".format(preview.targetX, preview.targetY))
-        DetailRow("Distance from centre", "%.0f%%".format(preview.centrality * 100))
-    }
-}
-
-@Composable
-private fun DetailRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodySmall)
-    }
-}

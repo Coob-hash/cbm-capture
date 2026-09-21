@@ -205,11 +205,11 @@ class ArCameraController : GLSurfaceView.Renderer {
         _trackingState.value = trackingStateOf(frame)
         _trackingAdvice.value = when (frame.camera.trackingFailureReason) {
             com.google.ar.core.TrackingFailureReason.NONE -> null
-            com.google.ar.core.TrackingFailureReason.BAD_STATE -> "Tracking lost - hold steady."
-            com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT -> "Too dark to track - add light."
-            com.google.ar.core.TrackingFailureReason.EXCESSIVE_MOTION -> "Moving too fast - slow down."
-            com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES -> "Not enough detail to track."
-            com.google.ar.core.TrackingFailureReason.CAMERA_UNAVAILABLE -> "The camera is in use elsewhere."
+            com.google.ar.core.TrackingFailureReason.BAD_STATE -> "Hold the phone steady."
+            com.google.ar.core.TrackingFailureReason.INSUFFICIENT_LIGHT -> "Too dark — turn on a light."
+            com.google.ar.core.TrackingFailureReason.EXCESSIVE_MOTION -> "Moving too fast — slow down."
+            com.google.ar.core.TrackingFailureReason.INSUFFICIENT_FEATURES -> "Point at something with more detail."
+            com.google.ar.core.TrackingFailureReason.CAMERA_UNAVAILABLE -> "Another app is using the camera."
             else -> null
         }
     }
