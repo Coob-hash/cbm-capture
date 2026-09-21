@@ -307,8 +307,11 @@ three sections of one app.
 - **T-4** Lists the technician's tickets in `ASSIGNED` and `REWORK`. A `REWORK` item shows the FM's
   reason prominently. Items leave this list when a report is submitted for the current approval
   cycle.
-- **T-5** **The report is the existing template, filled in-app — never a manual upload.** The form
-  is `cbm/templates/technician-report/submission.schema.json`:
+- **T-5** **The report is the existing template, filled in-app — never a manual upload.** Today the
+  app opens that template's own page inside itself (the page builds and posts the PDF, so nothing is
+  uploaded by hand); the Kotlin form below replaces it once the app can submit fields and have the
+  PDF rendered for it (Q18, Q19). The form is
+  `cbm/templates/technician-report/submission.schema.json`:
   - *prefilled and locked* from `cbm_technician_report_access()`: ticket, technician name/email,
     asset, location, reported issue;
   - *entered by the technician*: work date, findings, work performed, materials, checks, check
@@ -687,6 +690,8 @@ unfinished app phase.
 | Q15 | ~~Where are capture images stored?~~ **Decided 19 Sep** | On the App API's own volume; WF1 fetches them from the internal image service (`cbm-app-internal:8081`, not published). The Drive branch stays until it is deleted |
 | Q16 | ~~How does the phone reach the API over HTTPS?~~ **Decided 19 Sep** | The existing ngrok domain. A Caddy proxy (`edge`) in the workflow stack sends `/v1/*` to the App API and everything else to n8n, as before; n8n never depends on the app being up |
 | Q17 | ~~Where does a self-registered technician's skill list come from?~~ **Decided 20 Sep** | The technician alone: a one-time "What do you work on?" step right after sign-up, changeable later in their own settings. The FM never touches another person's skills; only an administrator could, directly in the database, and normally nobody does. Until skills are set, dispatch offers that technician nothing |
+| Q18 | ~~Who renders the technician's report PDF?~~ **Decided 21 Sep** | n8n, with the existing `report-pdf.js` (pdf-lib), so an app report and a portal report are the same document. `pdf-lib` is allowed in the runner exactly as `pdf-parse` already is. A renderer inside the App API is the likely end state, once the layout no longer has to match |
+| Q19 | ~~How does WF2 learn about a report submitted in the app?~~ **Decided 21 Sep** | The WF1 pattern: a notification when the app stores the report, plus a one-minute sweep. The branch joins **through** `Extract Ticket ID` (two nodes read it by name, as seven read `Capture Input` in WF1), then renders the PDF and hands the binary to the existing extraction. The Drive trigger stays until it is deleted |
 
 ---
 
