@@ -36,6 +36,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The default adds 'tools', a package cmdline-tools 16 no longer has: sdkmanager fails
+          # on it and the job stops before Gradle runs. AGP fetches the platforms it needs.
+          packages: platform-tools
 
       - name: Unit tests
         run: ./gradlew testDebugUnitTest --no-daemon --console=plain
@@ -168,6 +172,10 @@ jobs:
           cache: gradle
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The default adds 'tools', a package cmdline-tools 16 no longer has: sdkmanager fails
+          # on it and the job stops before Gradle runs. AGP fetches the platforms it needs.
+          packages: platform-tools
       # A throwaway PostgreSQL + App API in Docker; the app's own Retrofit client, uploader and
       # capture contract sign up, upload a photo, list it, and log out against it.
       - name: Contract test
