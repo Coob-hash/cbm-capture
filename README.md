@@ -17,10 +17,12 @@ implementations are line-for-line ports of it, and both test suites assert its i
 
 ```
 backend/        the App API (FastAPI), schema cbm_app, the WF1 app branch; the phone talks only to this
+                deploy/: Install-CbmApp.ps1, Approve-CbmFm.ps1 (the operator approves FM accounts)
 android/        Kotlin 2.1 · Kotlin Multiplatform (:shared) · Compose · ARCore · Room · Hilt
 contract/       capture JSON Schema, OpenAPI, worked example
 docs/           the intrinsics specification, PRD v1 (capture requirements)
 ios/            Swift 6 · SwiftUI · ARKit — set aside
+generated_frontend/  the second front end whose design the Android app took over (reference only)
 PRD.md          product requirements (v2)
 ```
 
@@ -82,7 +84,7 @@ was written to the system PATH or registry — activate them per session:
 ```powershell
 . .\tools\env.ps1          # PowerShell   (or: source tools/env.sh   in Git Bash)
 cd android
-.\gradlew.bat testDebugUnitTest         # 16 tests (in :shared), no device needed
+.\gradlew.bat testDebugUnitTest         # 44 tests (:shared and :app), no device needed
 .\gradlew.bat :app:assembleDebug        # -> app/build/outputs/apk/debug/app-debug.apk
 .\gradlew.bat :app:installDebug         # ARCore-supported device over USB
 ```
@@ -152,7 +154,7 @@ CI: <https://github.com/Coob-hash/cbm-capture/actions> — Android, iOS, backend
 
 | | |
 |---|---|
-| **Android** | Kotlin Multiplatform layout (`:shared` + `:app`); **16/16 unit tests pass**; debug APK builds. Role screens in progress. |
+| **Android** | 1.0.1 (23 Sep 2026): the merged app, one login and a home per role (reporter, technician, FM) over the live App API; AR capture with a standard-camera fallback. **44/44 unit tests pass**; debug APK builds and was exercised against the deployment on an emulator. See [`android/README.md`](android/README.md). |
 | **iOS** | Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`, **17/17 tests pass** on the simulator. |
 | **Backend** | Running on the deployment. SQL suite + 22 API tests pass against the live workflow schema, through the restricted database login. |
 | **Contract** | Example validates against the schema; frame invariant holds. |

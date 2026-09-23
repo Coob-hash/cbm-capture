@@ -55,6 +55,33 @@ about a minute, which is what the screen says.
   the template opens in the app, with the file chooser wired so the AFTER photo can be attached.
   The page still builds and posts the PDF itself, so nobody uploads a file anywhere.
 
+## Closed on 23 Sep (1.0.1, versionCode 2)
+
+Found by running the 21 Sep APK against the live deployment, fixed, and re-tested on an emulator.
+
+- **A QR sign-up no longer lands on Log in.** `MainActivity` passed `startDestination = startRoute()`,
+  re-read on every recomposition; once the join link stored the site code, the start became Log in,
+  NavHost rebuilt its graph and started over there. The start is now computed once (`remember`), and a
+  recreated activity no longer re-reads the launch link.
+- **Phones without ARCore get a camera.** Before, the capture screen stayed black with no message
+  (`runCatching` swallowed the install result, and the Camera2 fallback was wired in DI but never
+  called). Now `CaptureViewModel.resolveCameraMode` follows ARCore's install flow and, when AR is
+  unsupported, declined, or its session cannot start, switches to the standard camera
+  (`data/capture/StillCameraController.kt`, CameraX): the whole frame letterboxed, one tap takes the
+  photo and marks the damage. K is the factory calibration (`ANDROID_CAMERA2`, converted by
+  `domain/intrinsics/Camera2Calibration.kt`) or the photo's EXIF (`EXIF`), recorded as such; with
+  neither, the photo is refused rather than given an invented K. The tap is carried view → preview →
+  sensor → photograph by `domain/imaging/StillFraming.kt`. No pose on this path.
+- **The camera starts after ARCore is installed**, and the AR session now pauses and resumes with the
+  app: session creation and resume are driven by lifecycle events instead of a one-shot
+  `DisposableEffect(Unit)`.
+- **Sign-up starts from an empty email.** The last account's address stays on Log in, but opening
+  sign-up clears it, so a new address is no longer appended to the old one.
+- `client.app_version` now comes from the build (`1.0.1 (2)`), not a hard-coded string.
+
+Tests: 44 (11 new, in `StillFramingTest`: unrotate, the tap mapping, the calibration crop, and the ray
+under the tap through the whole pipeline).
+
 ## Build and run
 
 ```bash
