@@ -4,6 +4,8 @@ import ai.cbm.capture.domain.imaging.PinholeCamera
 import ai.cbm.capture.domain.intrinsics.IntrinsicsGate
 import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayInputStream
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Last-resort intrinsics, from the JPEG's own EXIF.
@@ -18,13 +20,17 @@ import java.io.ByteArrayInputStream
  */
 object ExifIntrinsicsReader {
 
-    /** Derive K from the EXIF of an already-encoded JPEG, for its own dimensions. */
+    /** Derive K from the EXIF of an already-encoded JPEG, for a frame of [width] x [height]. */
     fun read(jpeg: ByteArray, width: Int, height: Int): PinholeCamera? {
         val exif = runCatching { ExifInterface(ByteArrayInputStream(jpeg)) }.getOrNull() ?: return null
 
         val f35 = exif.getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, 0.0)
         if (f35 > 0) {
-            return IntrinsicsGate.fromExif(f35, width, height)
+            // The 36 mm of the 35 mm frame is its long side. A portrait buffer is measured along
+            // its long side too; with square pixels and a centred principal point, that is the
+            // only thing the orientation changes.
+            val landscape = IntrinsicsGate.fromExif(f35, max(width, height), min(width, height)) ?: return null
+            return PinholeCamera(landscape.fx, landscape.fy, width / 2.0, height / 2.0, width, height)
         }
 
         // Some devices omit the 35 mm equivalent but publish the physical focal length. Without

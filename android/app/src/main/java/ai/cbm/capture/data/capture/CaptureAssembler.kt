@@ -1,6 +1,9 @@
 package ai.cbm.capture.data.capture
 
+import ai.cbm.capture.BuildConfig
 import ai.cbm.capture.domain.imaging.ImageTransform
+import ai.cbm.capture.domain.imaging.PinholeCamera
+import ai.cbm.capture.domain.imaging.PointF2
 import ai.cbm.capture.domain.imaging.QuarterTurn
 import ai.cbm.capture.domain.intrinsics.IntrinsicsGate
 import ai.cbm.capture.domain.model.CaptureMetadata
@@ -8,6 +11,7 @@ import ai.cbm.capture.domain.model.ClientInfo
 import ai.cbm.capture.domain.model.ImageDescriptor
 import ai.cbm.capture.domain.model.IntrinsicsSource
 import ai.cbm.capture.domain.model.PixelPoint
+import ai.cbm.capture.domain.model.PoseSample
 import ai.cbm.capture.domain.model.TargetDescriptor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -53,23 +57,54 @@ class CaptureAssembler(
         val turn: QuarterTurn
     )
 
-    fun assemble(snapshot: ArSnapshot, input: Input, source: IntrinsicsSource = IntrinsicsSource.ARCORE): Package {
+    /** A frame of the AR session. */
+    fun assemble(snapshot: ArSnapshot, input: Input, source: IntrinsicsSource = IntrinsicsSource.ARCORE): Package =
+        build(snapshot.camera, snapshot.targetPixel, snapshot.pose, input, source) { transform ->
+            renderJpeg(nv21ToJpeg(snapshot), snapshot.imageWidth, snapshot.imageHeight, crop = null, transform)
+        }
+
+    /**
+     * A photograph from the camera path without AR. [Input.turn] must be the still's own turn
+     * ([StillSnapshot.turn]): it is the camera, not the display, that knows how its JPEG lies.
+     */
+    fun assemble(still: StillSnapshot, input: Input): Package =
+        build(
+            still.camera, still.targetPixel, pose = null, input, still.source,
+            skew = still.skew, lens = still.lens, distortion = still.distortion
+        ) { transform ->
+            renderJpeg(still.jpeg, still.bufferWidth, still.bufferHeight, still.crop, transform)
+        }
+
+    private fun build(
+        camera: PinholeCamera,
+        targetPixel: PointF2,
+        pose: PoseSample?,
+        input: Input,
+        source: IntrinsicsSource,
+        skew: Double = 0.0,
+        lens: String? = null,
+        distortion: List<Double>? = null,
+        render: (ImageTransform.Result) -> Bitmap
+    ): Package {
         // 1. One transform, computed once, applied to K and to the tap together.
         val transform = ImageTransform.apply(
-            camera = snapshot.camera,
-            target = snapshot.targetPixel,
+            camera = camera,
+            target = targetPixel,
             turn = input.turn
         )
 
         // 2. The same transform drives the pixels.
-        val bitmap = renderBitmap(snapshot, transform)
+        val bitmap = render(transform)
         val imageBytes = bitmap.toJpeg(QUALITY)
         val thumbnail = bitmap.thumbnail()?.toJpeg(THUMBNAIL_QUALITY)
         bitmap.recycle()
 
         // 3. Trust is decided on the transmitted-frame K, not the sensor-frame K, because that
-        //    is the one the server and MultiSet will actually use.
-        val intrinsics = IntrinsicsGate.intrinsics(transform.camera, source)
+        //    is the one the server and MultiSet will actually use. Skew follows the x scale; it is
+        //    carried for completeness and ignored by the ray math.
+        val intrinsics = IntrinsicsGate.intrinsics(
+            transform.camera, source, skew = skew * transform.scale, lens = lens, distortion = distortion
+        )
 
         val centrality = ImageTransform.centrality(
             transform.target, transform.camera.width, transform.camera.height
@@ -97,7 +132,7 @@ class CaptureAssembler(
                 pixel = PixelPoint(transform.target.x, transform.target.y),
                 centrality = centrality
             ),
-            pose = snapshot.pose
+            pose = pose
         )
 
         assertFrameConsistency(metadata)
@@ -106,27 +141,49 @@ class CaptureAssembler(
 
     // ---- Pixels ----
 
-    /**
-     * NV21 -> JPEG -> subsampled bitmap -> rotate and scale to the exact transmitted size.
-     *
-     * The intermediate decode is subsampled so a 12 MP frame never becomes a 48 MB ARGB bitmap
-     * on the heap; the final matrix pass then lands on the exact target dimensions, which is
-     * what the transmitted K describes.
-     */
-    private fun renderBitmap(snapshot: ArSnapshot, transform: ImageTransform.Result): Bitmap {
+    private fun nv21ToJpeg(snapshot: ArSnapshot): ByteArray {
         val yuv = YuvImage(snapshot.nv21, ImageFormat.NV21, snapshot.imageWidth, snapshot.imageHeight, null)
         val jpegStream = ByteArrayOutputStream()
         yuv.compressToJpeg(Rect(0, 0, snapshot.imageWidth, snapshot.imageHeight), INTERMEDIATE_QUALITY, jpegStream)
-        val jpeg = jpegStream.toByteArray()
+        return jpegStream.toByteArray()
+    }
 
+    /**
+     * JPEG -> subsampled bitmap -> crop -> rotate and scale to the exact transmitted size.
+     *
+     * The intermediate decode is subsampled so a 12 MP frame never becomes a 48 MB ARGB bitmap
+     * on the heap; the final matrix pass then lands on the exact target dimensions, which is
+     * what the transmitted K describes. [crop] is in the full-resolution buffer's pixels.
+     */
+    private fun renderJpeg(
+        jpeg: ByteArray,
+        bufferWidth: Int,
+        bufferHeight: Int,
+        crop: Rect?,
+        transform: ImageTransform.Result
+    ): Bitmap {
         val longestOut = maxOf(transform.camera.width, transform.camera.height)
-        val longestIn = maxOf(snapshot.imageWidth, snapshot.imageHeight)
+        val longestIn = crop?.let { maxOf(it.width(), it.height()) } ?: maxOf(bufferWidth, bufferHeight)
+        val sample = sampleSizeFor(longestIn, longestOut)
         val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSizeFor(longestIn, longestOut)
+            inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options)
+        var decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options)
             ?: throw IllegalStateException("The camera frame could not be decoded.")
+
+        if (crop != null && (crop.width() != bufferWidth || crop.height() != bufferHeight)) {
+            // The decoder's own scale, not the requested sample size: it may round.
+            val sx = decoded.width.toDouble() / bufferWidth
+            val sy = decoded.height.toDouble() / bufferHeight
+            val left = (crop.left * sx).toInt().coerceIn(0, decoded.width - 1)
+            val top = (crop.top * sy).toInt().coerceIn(0, decoded.height - 1)
+            val width = (crop.width() * sx).toInt().coerceIn(1, decoded.width - left)
+            val height = (crop.height() * sy).toInt().coerceIn(1, decoded.height - top)
+            val cropped = Bitmap.createBitmap(decoded, left, top, width, height)
+            if (cropped !== decoded) decoded.recycle()
+            decoded = cropped
+        }
 
         val matrix = Matrix().apply {
             postRotate(transform.turn.turns * 90f)
@@ -201,7 +258,7 @@ class CaptureAssembler(
          * calibration note needs to distinguish camera hardware.
          */
         fun currentClient(): ClientInfo = ClientInfo(
-            appVersion = "1.0.0 (1)",
+            appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
             osVersion = Build.VERSION.RELEASE ?: "unknown",
             deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
         )

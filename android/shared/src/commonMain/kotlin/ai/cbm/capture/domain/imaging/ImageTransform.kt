@@ -28,6 +28,9 @@ enum class QuarterTurn(val turns: Int) {
     NONE(0), CW90(1), CW180(2), CW270(3);
 
     companion object {
+        /** From a clockwise angle in degrees, as a camera reports the rotation a frame needs. */
+        fun ofDegrees(degrees: Int): QuarterTurn = entries[((degrees / 90) % 4 + 4) % 4]
+
         /**
          * Rotation that brings a sensor-native landscape frame upright, given the display
          * rotation reported by the window manager (`Surface.ROTATION_*`).
@@ -99,6 +102,21 @@ object ImageTransform {
             QuarterTurn.CW90 -> PointF2(h - point.y, point.x)
             QuarterTurn.CW180 -> PointF2(w - point.x, h - point.y)
             QuarterTurn.CW270 -> PointF2(point.y, w - point.x)
+        }
+    }
+
+    /**
+     * The inverse of [rotate]: a point of the upright image back into the frame it was turned from.
+     * [width] and [height] are that original frame's, as for [rotate].
+     */
+    fun unrotate(point: PointF2, width: Int, height: Int, turn: QuarterTurn): PointF2 {
+        val w = width.toDouble()
+        val h = height.toDouble()
+        return when (turn) {
+            QuarterTurn.NONE -> point
+            QuarterTurn.CW90 -> PointF2(point.y, h - point.x)
+            QuarterTurn.CW180 -> PointF2(w - point.x, h - point.y)
+            QuarterTurn.CW270 -> PointF2(w - point.y, point.x)
         }
     }
 

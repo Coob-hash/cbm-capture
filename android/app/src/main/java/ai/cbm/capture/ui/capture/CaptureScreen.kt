@@ -1,7 +1,9 @@
 package ai.cbm.capture.ui.capture
 
 import ai.cbm.capture.data.capture.ArCameraController
+import ai.cbm.capture.data.capture.StillCameraController
 import ai.cbm.capture.domain.model.TrackingState
+import ai.cbm.capture.ui.capture.CaptureViewModel.CameraMode
 import ai.cbm.capture.ui.common.InstructionCard
 import ai.cbm.capture.ui.common.Toast
 import ai.cbm.capture.ui.review.ReviewSheet
@@ -13,6 +15,8 @@ import android.opengl.GLSurfaceView
 import android.view.MotionEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,18 +44,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Session
+import com.google.ar.core.exceptions.CameraNotAvailableException
+import kotlinx.coroutines.CancellationException
 
 /**
  * The camera screen. One instruction, one gesture.
@@ -64,12 +74,15 @@ fun CaptureScreen(
 ) {
     val context = LocalContext.current
     val activity = context as Activity
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val phase by viewModel.phase.collectAsStateWithLifecycle()
     val pendingCount by viewModel.pendingCount.collectAsStateWithLifecycle()
     val trackingState by viewModel.trackingState.collectAsStateWithLifecycle()
     val trackingAdvice by viewModel.trackingAdvice.collectAsStateWithLifecycle()
     val toast by viewModel.toast.collectAsStateWithLifecycle()
+    val cameraMode by viewModel.cameraMode.collectAsStateWithLifecycle()
+    val standardReady by viewModel.standardCameraReady.collectAsStateWithLifecycle()
 
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -84,16 +97,36 @@ fun CaptureScreen(
         if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
+    // Every resume can end a wait: back from the permission dialog, or back from installing
+    // ARCore. Counting resumes re-runs the decision below until it is made.
+    var resumes by remember { mutableIntStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumes++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(hasCameraPermission, resumes) {
+        if (hasCameraPermission) viewModel.resolveCameraMode(activity)
+    }
+
     Box(Modifier.fillMaxSize()) {
-        if (hasCameraPermission) {
-            ArCameraPreview(
+        when {
+            !hasCameraPermission -> PermissionPrompt { permissionLauncher.launch(Manifest.permission.CAMERA) }
+            cameraMode == CameraMode.AR -> ArCameraPreview(
                 controller = viewModel.controller,
                 onSessionReady = viewModel::onSessionReady,
                 onSessionPaused = viewModel::onSessionPaused,
+                onUnavailable = viewModel::onArUnavailable,
                 onTap = { nx, ny, rotation -> viewModel.onTap(nx, ny, rotation) }
             )
-        } else {
-            PermissionPrompt { permissionLauncher.launch(Manifest.permission.CAMERA) }
+            cameraMode == CameraMode.STANDARD -> StandardCameraPreview(
+                controller = viewModel.stillCamera,
+                onFailed = viewModel::onStandardCameraFailed,
+                onTap = viewModel::onStandardTap
+            )
+            else -> Box(Modifier.fillMaxSize().background(Color.Black))
         }
 
         Column(
@@ -101,7 +134,13 @@ fun CaptureScreen(
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                CalibrationBadge(trackingState)
+                CalibrationBadge(
+                    when (cameraMode) {
+                        CameraMode.AR -> trackingState
+                        CameraMode.STANDARD -> if (standardReady) TrackingState.NORMAL else TrackingState.NOT_AVAILABLE
+                        CameraMode.CHECKING -> TrackingState.NOT_AVAILABLE
+                    }
+                )
                 BadgedBox(badge = { if (pendingCount > 0) Badge { Text("$pendingCount") } }) {
                     FilledTonalButton(onClick = onDone) {
                         Icon(Icons.Default.Inbox, contentDescription = null, Modifier.size(18.dp))
@@ -113,7 +152,7 @@ fun CaptureScreen(
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 when {
-                    trackingAdvice != null -> InstructionCard(trackingAdvice!!, isWarning = true)
+                    cameraMode == CameraMode.AR && trackingAdvice != null -> InstructionCard(trackingAdvice!!, isWarning = true)
                     phase is CaptureViewModel.Phase.Processing -> InstructionCard("Preparing the photo...")
                     viewModel.isReplacement -> InstructionCard("Another photo of the same problem: tap the damaged part")
                     else -> InstructionCard("Tap the damaged part")
@@ -158,20 +197,23 @@ fun CaptureScreen(
  * Hosts the ARCore session in a [GLSurfaceView].
  *
  * ARCore requires a GL context to be pumping the camera texture, so a surface is unavoidable
- * even though nothing is drawn on top of the feed. Session creation is deferred to
- * `onResume` semantics via [DisposableEffect]: ARCore refuses to resume a session whose camera
- * permission was granted after the session was built.
+ * even though nothing is drawn on top of the feed. The session follows the activity: created on
+ * the first resume (ARCore refuses to resume a session whose camera permission was granted after
+ * it was built), paused on every pause, resumed on every resume, closed when the screen goes. A
+ * session that cannot be created or resumed is reported through [onUnavailable] - the screen then
+ * falls back to the standard camera instead of staying black.
  */
 @Composable
 private fun ArCameraPreview(
     controller: ArCameraController,
     onSessionReady: (Session) -> Unit,
     onSessionPaused: () -> Unit,
+    onUnavailable: (Throwable) -> Unit,
     onTap: (normalizedX: Float, normalizedY: Float, surfaceRotation: Int) -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as Activity
-    var session by remember { mutableStateOf<Session?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val glView = remember {
         GLSurfaceView(context).apply {
@@ -183,25 +225,47 @@ private fun ArCameraPreview(
         }
     }
 
-    DisposableEffect(Unit) {
-        val created = runCatching {
-            when (ArCoreApk.getInstance().requestInstall(activity, true)) {
-                ArCoreApk.InstallStatus.INSTALLED -> Session(activity)
-                // The user was sent to install ARCore; the activity will be resumed afterwards
-                // and this effect will run again.
-                ArCoreApk.InstallStatus.INSTALL_REQUESTED -> null
-                else -> null
-            }
-        }.getOrNull()
+    DisposableEffect(lifecycleOwner) {
+        var session: Session? = null
+        var failed = false
 
-        if (created != null) {
-            session = created
-            onSessionReady(created)
-            created.resume()
-            glView.onResume()
+        fun resume() {
+            if (failed) return
+            val current = session ?: try {
+                Session(activity).also {
+                    session = it
+                    onSessionReady(it)
+                }
+            } catch (e: Exception) {
+                failed = true
+                onUnavailable(e)
+                return
+            }
+            try {
+                current.resume()
+                glView.onResume()
+            } catch (e: CameraNotAvailableException) {
+                failed = true
+                onUnavailable(e)
+            }
         }
 
+        // Added while the screen is already resumed, the observer is brought up to date at once,
+        // ON_RESUME included, so the first resume needs no separate call.
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> resume()
+                Lifecycle.Event.ON_PAUSE -> {
+                    glView.onPause()
+                    session?.pause()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             glView.onPause()
             onSessionPaused()
             session?.pause()
@@ -211,7 +275,7 @@ private fun ArCameraPreview(
     }
 
     AndroidView(
-        factory = { view ->
+        factory = { _ ->
             glView.setOnTouchListener { v, event ->
                 if (event.action == MotionEvent.ACTION_UP && v.width > 0 && v.height > 0) {
                     val rotation = v.display?.rotation ?: 0
@@ -230,6 +294,56 @@ private fun ArCameraPreview(
                 controller.setDisplayGeometry(rotation, view.width, view.height)
             }
         }
+    )
+}
+
+/**
+ * The camera for phones without AR: the whole frame shown letterboxed ("fit centre"), so the
+ * worker sees exactly what the photograph will contain and a tap maps onto it without guessing
+ * at a crop. CameraX follows the screen's lifecycle on its own.
+ */
+@Composable
+private fun StandardCameraPreview(
+    controller: StillCameraController,
+    onFailed: (Throwable) -> Unit,
+    onTap: (x: Float, y: Float, viewWidth: Int, viewHeight: Int, surfaceRotation: Int) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FIT_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            setBackgroundColor(android.graphics.Color.BLACK)
+        }
+    }
+
+    LaunchedEffect(lifecycleOwner) {
+        try {
+            controller.bind(context, lifecycleOwner, previewView)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onFailed(e)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { controller.unbind() }
+    }
+
+    AndroidView(
+        factory = { _ ->
+            previewView.setOnTouchListener { v, event ->
+                if (event.action == MotionEvent.ACTION_UP && v.width > 0 && v.height > 0) {
+                    onTap(event.x, event.y, v.width, v.height, v.display?.rotation ?: 0)
+                    v.performClick()
+                }
+                true
+            }
+            previewView
+        },
+        modifier = Modifier.fillMaxSize()
     )
 }
 
