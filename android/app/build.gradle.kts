@@ -101,6 +101,7 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.kotlinx.serialization)
     implementation(libs.okhttp)
+    implementation(libs.coil.compose)   // the reporter's photo on an FM or technician card
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
 
@@ -120,6 +121,7 @@ val checkVisibleTextIsPlain by tasks.registering {
     val uiSources = files(
         fileTree("src/main/java/ai/cbm/capture/ui") { include("**/*.kt") },
         fileTree("../shared/src/commonMain/kotlin/ai/cbm/capture/ui") { include("**/*.kt") },
+        fileTree("../shared/src/androidMain/kotlin/ai/cbm/capture/ui") { include("**/*.kt") },
     )
     inputs.files(uiSources)
     doLast {

@@ -16,6 +16,11 @@ kotlin {
     androidTarget {
         compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
     }
+    // A review target, not a product one: it renders the screens to PNG on a PC that has no
+    // emulator (./gradlew :shared:screenshots). Nothing in the app depends on it.
+    jvm("desktop") {
+        compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
+    }
 
     sourceSets {
         commonMain.dependencies {
@@ -24,9 +29,19 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.ui)
             api(libs.kotlinx.serialization.json)
+            api(libs.kotlinx.datetime)   // the session countdown and the offer clock
+        }
+        androidMain.dependencies {
+            // The two platform pieces of ui/design: the image loader and the report page's
+            // file chooser. Nothing in commonMain sees either.
+            implementation(libs.coil.compose)
+            implementation(libs.androidx.activity.compose)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+        }
+        val desktopMain by getting {
+            dependencies { implementation(compose.desktop.currentOs) }
         }
     }
 }
@@ -70,3 +85,14 @@ val checkCommonMainIsPlatformFree by tasks.registering {
     }
 }
 tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(checkCommonMainIsPlatformFree) }
+
+/** Renders every screen to a PNG at phone size, without an emulator. Review only. */
+tasks.register<JavaExec>("screenshots") {
+    group = "verification"
+    description = "Draws each screen to shots/*.png at 390 x 844 dp."
+    dependsOn("desktopMainClasses")
+    val main = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    classpath = files(main.output.allOutputs, main.runtimeDependencyFiles)
+    mainClass.set("ai.cbm.capture.screenshots.ShotsKt")
+    args = listOf(project.findProperty("outDir") as String? ?: "${rootDir}/shots")
+}

@@ -66,9 +66,12 @@ class HomeItemsTest {
     @Test
     fun `each session lands on its role's home`() {
         assertEquals("home", homeFor(session(m("1", "USER"))))
+        assertEquals("technician", homeFor(session(m("1", "TECHNICIAN"))))
+        assertEquals("fm", homeFor(session(m("1", "FM"))))
+        // A role that is not active yet reaches no screen, whichever role it is.
         assertEquals("waiting", homeFor(session(m("1", "USER", "PENDING"))))
         assertEquals("waiting", homeFor(session(m("1", "TECHNICIAN", "PENDING"))))
-        assertEquals("waiting", homeFor(session(m("1", "FM"))))
+        assertEquals("waiting", homeFor(session(m("1", "FM", "PENDING"))))
         assertEquals("role", homeFor(session(m("1", "USER"), m("2", "TECHNICIAN"), bound = null)))
         assertEquals("home", homeFor(session(m("1", "USER"), m("2", "TECHNICIAN"), bound = "1")))
     }

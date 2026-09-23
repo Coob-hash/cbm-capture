@@ -1,41 +1,64 @@
 package ai.cbm.capture.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ColorScheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 
-private val LightColors = lightColorScheme(
-    primary = Color(0xFF2C5A8A),
-    onPrimary = Color.White,
-    secondary = Color(0xFF4A6572),
-    tertiary = Color(0xFF9A6A00),
-    error = Color(0xFFB3261E)
+/** Squared, instrument-like geometry: small radii, hairline borders, no blobs. */
+class CbmDimens(
+    val s1: Dp = 4.dp,
+    val s2: Dp = 8.dp,
+    val s3: Dp = 12.dp,
+    val s4: Dp = 16.dp,
+    val s5: Dp = 20.dp,
+    val s6: Dp = 24.dp,
+    val s8: Dp = 32.dp,
+    val rail: Dp = 4.dp,
+    val cardRadius: Dp = 4.dp,
+    val buttonRadius: Dp = 3.dp,
+    val buttonHeight: Dp = 48.dp,
 )
 
-private val DarkColors = darkColorScheme(
-    primary = Color(0xFFA8C8EC),
-    onPrimary = Color(0xFF10314F),
-    secondary = Color(0xFFB6CAD6),
-    tertiary = Color(0xFFF2C14E),
-    error = Color(0xFFF2B8B5)
-)
+val LocalDimens = staticCompositionLocalOf { CbmDimens() }
+val LocalAccent = staticCompositionLocalOf { RoleAccent.REPORTER }
 
+/** The accent of the role this session is bound to, from the API's wire values. */
+fun accentFor(role: String?): RoleAccent = when (role) {
+    "TECHNICIAN" -> RoleAccent.TECHNICIAN
+    "FM", "ADMIN" -> RoleAccent.FM
+    else -> RoleAccent.REPORTER
+}
+
+/**
+ * The app's theme. One deliberate palette, so a screen looks the same on every phone: no Material
+ * You dynamic colour. The role moves the accent only, never the layout.
+ */
 @Composable
 fun CbmCaptureTheme(
+    role: String? = null,
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
-    // Material You where the platform offers it. The capture screen is mostly camera feed, so
-    // the palette only has to keep the overlay chrome legible against arbitrary imagery.
-    val colorScheme = platformColorScheme(darkTheme) ?: if (darkTheme) DarkColors else LightColors
-
-    MaterialTheme(colorScheme = colorScheme, content = content)
+    CompositionLocalProvider(
+        LocalDimens provides CbmDimens(),
+        LocalTechStyles provides CbmTechStyles(),
+        LocalAccent provides accentFor(role),
+    ) {
+        MaterialTheme(
+            colorScheme = if (darkTheme) CbmDarkColors else CbmLightColors,
+            typography = CbmTypography,
+            shapes = Shapes(
+                small = RoundedCornerShape(2.dp),
+                medium = RoundedCornerShape(4.dp),
+                large = RoundedCornerShape(6.dp),
+            ),
+            content = content,
+        )
+    }
 }
-
-/** The platform's own palette (Android 12+ dynamic colour), or null to use the CBM palette. */
-@Composable
-internal expect fun platformColorScheme(darkTheme: Boolean): ColorScheme?

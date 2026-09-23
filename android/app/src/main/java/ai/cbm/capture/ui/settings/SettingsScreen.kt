@@ -72,7 +72,7 @@ fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit, viewModel: Settings
                 Switch(checked = settings.uploadOnMetered, onCheckedChange = viewModel::setUploadOnMetered)
             }
             Text("Off: photos wait for Wi-Fi.", style = MaterialTheme.typography.bodySmall)
-            Text("Server", style = MaterialTheme.typography.titleMedium)
+            Text("Connected to", style = MaterialTheme.typography.titleMedium)
             Text(BuildConfig.API_BASE_URL, style = MaterialTheme.typography.bodySmall)
             OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("Log out") }
         }

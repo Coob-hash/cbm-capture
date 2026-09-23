@@ -47,6 +47,18 @@
             </intent-filter>
         </activity>
 
+        <!-- The camera app writes the report's AFTER photo into this app's cache, and nothing
+             else can read it: the grant lasts for that one picture. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.photos"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Hilt supplies the WorkerFactory, so the default initialiser is removed and
              re-registered by HiltWorkerFactory in the Application class. -->
         <provider

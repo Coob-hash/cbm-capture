@@ -12,19 +12,38 @@ import ai.cbm.capture.ui.auth.WaitingScreen
 import ai.cbm.capture.ui.auth.roleLabel
 import ai.cbm.capture.ui.capture.CaptureScreen
 import ai.cbm.capture.ui.capture.CaptureViewModel
+import ai.cbm.capture.ui.fm.FmHomeScreen
+import ai.cbm.capture.ui.fm.FmViewModel
 import ai.cbm.capture.ui.home.ReporterHomeViewModel
 import ai.cbm.capture.ui.reports.ReporterHomeScreen
 import ai.cbm.capture.ui.settings.SettingsScreen
+import ai.cbm.capture.ui.design.LocalPhotoUrl
+import ai.cbm.capture.ui.technician.ReportFormActions
+import ai.cbm.capture.ui.technician.ReportFormScreen
+import ai.cbm.capture.ui.technician.ReportFormViewModel
+import ai.cbm.capture.ui.technician.ReportSentScreen
+import ai.cbm.capture.ui.technician.TechnicianHomeScreen
+import ai.cbm.capture.ui.technician.TechnicianViewModel
 import ai.cbm.capture.ui.theme.CbmCaptureTheme
+import ai.cbm.capture.BuildConfig
 import ai.cbm.capture.work.UploadWorker
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,9 +82,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         pendingLink.value = intent?.dataString
         setContent {
-            CbmCaptureTheme {
+            val session by sessions.session.collectAsStateWithLifecycle()
+            CbmCaptureTheme(role = session?.membership?.role) {
                 val nav = rememberNavController()
-                val session by sessions.session.collectAsStateWithLifecycle()
+                CompositionLocalProvider(LocalPhotoUrl provides ::photoUrl) {
                 val form by auth.form.collectAsStateWithLifecycle()
                 val link by pendingLink.collectAsStateWithLifecycle()
 
@@ -119,15 +139,77 @@ class MainActivity : ComponentActivity() {
                             onSettings = { nav.navigate(Route.SETTINGS) },
                             onLogout = { logout(nav) })
                     }
+                    composable(Route.TECHNICIAN) {
+                        val vm: TechnicianViewModel = hiltViewModel()
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        TechnicianHomeScreen(
+                            state = state,
+                            onRefresh = vm::refresh,
+                            onAnswerOffer = vm::answerOffer,
+                            onSaveSkills = vm::saveSkills,
+                            onOpenReport = { job -> nav.navigate(Route.report(job.ticketId)) },
+                            onProfile = { nav.navigate(Route.SETTINGS) }
+                        )
+                    }
+                    composable(Route.FM) {
+                        val vm: FmViewModel = hiltViewModel()
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        FmHomeScreen(
+                            state = state,
+                            onRefresh = vm::refresh,
+                            onDecide = vm::decide,
+                            onProfile = { nav.navigate(Route.SETTINGS) }
+                        )
+                    }
                     composable(
                         Route.CAPTURE,
                         arguments = listOf(navArgument(CaptureViewModel.REPORT_ID_ARG) { type = NavType.StringType; defaultValue = "" })
                     ) {
                         CaptureScreen(onDone = { nav.popBackStack(Route.HOME, inclusive = false) })
                     }
+                    composable(
+                        Route.REPORT,
+                        arguments = listOf(navArgument(ReportFormViewModel.TICKET_ARG) { type = NavType.IntType })
+                    ) {
+                        val vm: ReportFormViewModel = hiltViewModel()
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        // The camera writes into this app's cache and hands back that one picture.
+                        var pending by remember { mutableStateOf<Pair<File, Uri>?>(null) }
+                        val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+                            val taken = pending
+                            pending = null
+                            if (ok && taken != null) vm.onPhotoTaken(taken.first, taken.second.toString())
+                            else taken?.first?.delete()
+                        }
+                        if (state.sent) {
+                            ReportSentScreen(state.ticketId, state.siteCode, state.expiresAtMillis) {
+                                nav.popBackStack()
+                            }
+                        } else {
+                            ReportFormScreen(
+                                state = state,
+                                actions = ReportFormActions(
+                                    onWorkDate = vm::onWorkDate, onFindings = vm::onFindings,
+                                    onWorkPerformed = vm::onWorkPerformed, onMaterials = vm::onMaterials,
+                                    onChecks = vm::onChecks, onCheckResult = vm::onCheckResult,
+                                    onOutcome = vm::onOutcome, onRemainingIssues = vm::onRemainingIssues,
+                                    onDeclaration = vm::onDeclaration,
+                                    onTakePhoto = {
+                                        val file = newPhotoFile()
+                                        val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.photos", file)
+                                        pending = file to uri
+                                        camera.launch(uri)
+                                    },
+                                    onRemovePhoto = vm::onRemovePhoto, onCaption = vm::onCaption,
+                                    onSend = vm::send, onBack = { nav.popBackStack() }
+                                )
+                            )
+                        }
+                    }
                     composable(Route.SETTINGS) {
                         SettingsScreen(onBack = { nav.popBackStack() }, onLogout = { logout(nav) })
                     }
+                }
                 }
             }
         }
@@ -155,6 +237,15 @@ class MainActivity : ComponentActivity() {
 
     private fun logout(nav: NavHostController) = auth.logout { nav.go(Route.LOGIN) }
 
+    /** A new file in this app's cache for the camera to write the report's photo into. */
+    private fun newPhotoFile(): File {
+        val dir = File(cacheDir, "report-photos").apply { mkdirs() }
+        return File(dir, "after-${System.currentTimeMillis()}.jpg")
+    }
+
+    /** Where a capture id is served from: the App API, with this session's token (Coil adds it). */
+    private fun photoUrl(captureId: String): String = BuildConfig.API_BASE_URL + "v1/photos/" + captureId
+
     private fun drainQueue() {
         if (sessions.current() == null) return
         lifecycleScope.launch { UploadWorker.enqueue(this@MainActivity, settings.settings.first().uploadOnMetered) }
@@ -169,13 +260,20 @@ class MainActivity : ComponentActivity() {
         const val CHOOSE_ROLE = "role"
         const val WAITING = "waiting"
         const val HOME = "home"
+        const val TECHNICIAN = "technician"
+        const val FM = "fm"
         const val CAPTURE = "capture?${CaptureViewModel.REPORT_ID_ARG}={${CaptureViewModel.REPORT_ID_ARG}}"
         const val SETTINGS = "settings"
+        const val REPORT = "report/{ticket}"
         fun capture(reportId: String?) = "capture?${CaptureViewModel.REPORT_ID_ARG}=${reportId.orEmpty()}"
+        fun report(ticketId: Int) = "report/$ticketId"
     }
 
     private companion object {
-        val PROTECTED = setOf(Route.CHOOSE_ROLE, Route.WAITING, Route.HOME, Route.CAPTURE, Route.SETTINGS)
+        val PROTECTED = setOf(
+            Route.CHOOSE_ROLE, Route.WAITING, Route.HOME, Route.TECHNICIAN, Route.FM, Route.CAPTURE,
+            Route.REPORT, Route.SETTINGS
+        )
     }
 }
 
@@ -184,7 +282,10 @@ internal fun homeFor(session: Session): String {
     val m = session.membership
     return when {
         m == null && session.memberships.size > 1 -> "role"
-        m != null && m.role == "USER" && m.isActive -> "home"
+        m == null || !m.isActive -> "waiting"
+        m.role == "USER" -> "home"
+        m.role == "TECHNICIAN" -> "technician"
+        m.role == "FM" || m.role == "ADMIN" -> "fm"
         else -> "waiting"
     }
 }
@@ -198,6 +299,6 @@ private fun waitingText(session: Session?): Pair<String, String> {
             "Your facility manager account for ${m.siteName} must be approved by an administrator. Tap Check again later."
         !m.isActive -> "Waiting for approval" to
             "Your $role account for ${m.siteName} must be approved by the facility manager. Tap Check again later."
-        else -> "Coming soon" to "The $role screens are the next part of the app. You are logged in to ${m.siteName}."
+        else -> "Nothing to do here" to "This account has no role with screens on ${m.siteName}."
     }
 }

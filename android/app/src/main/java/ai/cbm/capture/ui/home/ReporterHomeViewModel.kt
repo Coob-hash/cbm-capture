@@ -49,7 +49,9 @@ class ReporterHomeViewModel @Inject constructor(
     val state: StateFlow<ReporterHomeState> = combine(local, server, loading, error) { l, s, busy, err ->
         ReporterHomeState(
             siteName = session?.membership?.siteName.orEmpty(),
+            siteCode = session?.membership?.siteId.orEmpty(),
             email = session?.email.orEmpty(),
+            expiresAtMillis = session?.expiresAt?.toEpochMilli(),
             items = buildHomeItems(l, s),
             loading = busy,
             error = err
