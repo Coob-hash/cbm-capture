@@ -80,7 +80,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        pendingLink.value = intent?.dataString
+        // A recreated activity (rotation, say) still carries the launch intent; its link was
+        // already handled.
+        if (savedInstanceState == null) pendingLink.value = intent?.dataString
         setContent {
             val session by sessions.session.collectAsStateWithLifecycle()
             CbmCaptureTheme(role = session?.membership?.role) {
@@ -97,19 +99,32 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(link) {
                     val l = link ?: return@LaunchedEffect
                     pendingLink.value = null
-                    if (auth.joinSite(l) && sessions.current() == null) nav.go(Route.SIGN_UP)
+                    if (auth.joinSite(l) && sessions.current() == null) {
+                        auth.startSignUp()
+                        nav.go(Route.SIGN_UP)
+                    }
                 }
 
-                NavHost(navController = nav, startDestination = startRoute()) {
+                // Computed once. NavHost rebuilds its graph whenever startDestination changes, and a
+                // rebuilt graph starts over at its start: re-reading startRoute() on every
+                // recomposition sent a QR sign-up back to Log in the moment the site code was stored
+                // (the link effect clears pendingLink, which recomposes this scope). Every later
+                // move - log-in, log-out, the hour running out - navigates explicitly.
+                val startDestination = remember { startRoute() }
+                NavHost(navController = nav, startDestination = startDestination) {
                     composable(Route.JOIN) {
                         JoinSiteScreen(form, auth::onCode,
-                            onContinue = { if (auth.joinSite()) nav.navigate(Route.SIGN_UP) },
+                            onContinue = { if (auth.joinSite()) { auth.startSignUp(); nav.navigate(Route.SIGN_UP) } },
                             onHaveAccount = { auth.clearError(); nav.navigate(Route.LOGIN) })
                     }
                     composable(Route.LOGIN) {
                         LoginScreen(form, auth::onEmail, auth::onPassword,
                             onLogin = { auth.login { s -> onSessionOpened(nav, s) } },
-                            onSignUp = { auth.clearError(); nav.navigate(if (form.siteCode == null) Route.JOIN else Route.SIGN_UP) })
+                            onSignUp = {
+                                auth.clearError()
+                                if (form.siteCode == null) nav.navigate(Route.JOIN)
+                                else { auth.startSignUp(); nav.navigate(Route.SIGN_UP) }
+                            })
                     }
                     composable(Route.SIGN_UP) {
                         SignUpScreen(form, siteLabel = "code ${form.siteCode ?: "—"}", auth::onEmail, auth::onPassword, auth::onRole,

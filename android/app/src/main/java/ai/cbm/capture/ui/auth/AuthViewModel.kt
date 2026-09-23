@@ -28,10 +28,28 @@ class AuthViewModel @Inject constructor(
     val form: StateFlow<AuthFormState> = _form.asStateFlow()
 
     fun onCode(value: String) = _form.update { it.copy(codeInput = value, error = null) }
-    fun onEmail(value: String) = _form.update { it.copy(email = value, error = null) }
+    fun onEmail(value: String) {
+        emailOfLastAccount = false
+        _form.update { it.copy(email = value, error = null) }
+    }
     fun onPassword(value: String) = _form.update { it.copy(password = value, error = null) }
     fun onRole(value: RequestableRole) = _form.update { it.copy(role = value, error = null) }
     fun clearError() = _form.update { it.copy(error = null) }
+
+    /**
+     * True while the email field still holds the address of an account that has signed in. It stays
+     * after the session ends so Log in is one field shorter, but it can never create a new account
+     * (it has one already), so sign-up must not start from it: typing a new address after it
+     * produced "old@x.comnew@y.com".
+     */
+    private var emailOfLastAccount = false
+
+    /** Called on the way to the sign-up screen. */
+    fun startSignUp() {
+        val clearEmail = emailOfLastAccount
+        emailOfLastAccount = false
+        _form.update { it.copy(email = if (clearEmail) "" else it.email, password = "", error = null) }
+    }
 
     /** A typed code or a scanned join link. Returns false (with a message) if it is neither. */
     fun joinSite(input: String = _form.value.codeInput): Boolean {
@@ -60,6 +78,7 @@ class AuthViewModel @Inject constructor(
         viewModelScope.launch {
             auth.logout()
             _form.update { it.copy(password = "", busy = false, error = null) }
+            emailOfLastAccount = _form.value.email.isNotBlank()
             onDone()
         }
     }
@@ -70,8 +89,10 @@ class AuthViewModel @Inject constructor(
         viewModelScope.launch {
             when (val r = call()) {
                 is AuthResult.Ok -> {
-                    // The password is not kept in memory once it has done its job.
+                    // The password is not kept in memory once it has done its job. The email now
+                    // names an account, whether the session later ends by log-out or by the hour.
                     _form.update { it.copy(busy = false, password = "") }
+                    emailOfLastAccount = _form.value.email.isNotBlank()
                     onDone(r.session)
                 }
                 is AuthResult.Failed -> _form.update { it.copy(busy = false, error = r.message) }
