@@ -128,7 +128,9 @@ def check_geometry(metadata: dict) -> None:
     pixel = target.get("pixel") if isinstance(target, dict) else None
     if not isinstance(camera, dict) or not camera or not isinstance(pixel, dict) or not pixel:
         raise ImageError("INVALID_CAPTURE", "The capture has no camera data or no marked point.")
-    if camera.get("source") not in K_SOURCES or not isinstance(camera.get("trusted"), bool):
+    # A string first: a JSON array or object cannot be looked up in a set, and raised a 500.
+    source = camera.get("source")
+    if not isinstance(source, str) or source not in K_SOURCES or not isinstance(camera.get("trusted"), bool):
         raise ImageError("INVALID_CAPTURE", "The camera data does not say where it came from.")
     fx, fy, cx, cy = (_finite(camera.get(k)) for k in ("fx", "fy", "cx", "cy"))
     if fx is None or fy is None or cx is None or cy is None or fx <= 0 or fy <= 0:

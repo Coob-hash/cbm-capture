@@ -86,3 +86,42 @@ current version) and hands it to the extraction step exactly as the Drive downlo
 `Record App Submission` then claims the report for its approval cycle through the workflows' own
 `cbm_claim_technician_report()`, so one cycle still takes exactly one report whichever route it came
 by, and writes the outcome back to `cbm_app.technician_reports`.
+
+```
+App Report? ─┬ yes ─► Render Report PDF ─► Record App Submission ─► App Report Claimed? ─┐
+             └ no  ─► Download Report PDF ───────────────────────────────────────────────┴► Extract Report Text and Photo
+… ─► Set Pending Approval ─► Approval Cycle        (unchanged)
+```
+
+The claim runs **as soon as the document exists**, while the ticket is still the technician's to
+report (`ASSIGNED`, `REWORK`). That is the only time the workflows' claim accepts a report, and the
+cycle it is claimed for is the one the ticket is in. `Set Pending Approval` moves the ticket on and
+opens the next cycle, and `Approval Cycle` reads the ticket id and `approval_id` from the row it
+returns, so nothing may stand between them.
+
+The branch applied on 21 Sep did both of those wrong: it claimed after `Set Pending Approval`, and
+its claim node stood between that and `Approval Cycle`. Every app report came back `NOT_PROCESSED`,
+and the FM review loop never started (third audit, 25 Sep, finding 1).
+
+- **`App Report Claimed?`** lets the run continue only when the database answers `proceed: true`,
+  for a new claim or for a claim resumed by the sweep. Otherwise the run stops there, with the reason
+  already written on the app's row, and the app offers the job to be reported again. The node hands
+  the extraction the PDF from `Render Report PDF`, as the Drive download does.
+- **A run that stops after the claim** (the assessment fails, say) leaves the claim in place. After
+  ten minutes the sweep offers the report again, and `record_app_report_submission` answers with the
+  same claim, so the run finishes. Once `Set Pending Approval` has taken it, it is not offered again.
+- **A report written in an earlier round** (the job was reported another way and sent back before WF2
+  took this one) is not claimed for the new round.
+
+### Applying it to the running WF2
+
+The live WF2 has had the branch of 21 Sep since that day. `--upgrade` removes it (its eight nodes,
+the two connections it rerouted, its lines in `Extract Ticket ID`) and adds the current one, keeping
+every other change made since:
+
+    python wf2_app_branch.py --upgrade wf2-live.json wf2-upgraded.json <release>/cbm/templates/technician-report/report-pdf.js
+
+**Order matters.** `App Report Claimed?` reads the `proceed` flag, which only the database functions
+of this version return. Install the backend first (`deploy/Install-CbmApp.ps1`, which applies the
+migrations), then import the workflow. Importing it before the migrations would stop every app
+report at `App Report Claimed?`.

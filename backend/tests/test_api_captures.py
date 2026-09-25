@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from cbm_api import captures, internal, main
-from conftest import SITE, auth, sign_up
+from conftest import SITE, auth, device, sign_up
 
 
 @lru_cache(maxsize=None)
@@ -164,6 +164,9 @@ GEOMETRY_GAPS = {
     "centre outside the image": lambda m: m["camera"].update(cx=-1),
     "no source for K": lambda m: m["camera"].pop("source"),
     "trusted not a boolean": lambda m: m["camera"].update(trusted="yes"),
+    # Third audit 2026-09-25, finding 7: an array or an object as the source was a 500.
+    "source is a list": lambda m: m["camera"].update(source=[]),
+    "source is an object": lambda m: m["camera"].update(source={}),
 }
 
 
@@ -238,6 +241,40 @@ def test_only_a_reporter_session_can_upload(client):
     assert post(client, token, metadata(image, building_id="ELSEWHERE"), image).json()["error"] == "SITE_MISMATCH"
     no_meta = client.post("/v1/captures", headers=auth(token), files={"image": ("a.jpg", image, "image/jpeg")})
     assert no_meta.status_code == 422 and no_meta.json()["error"] == "INVALID_REQUEST"
+
+
+def two_site_reporter(client, owner):
+    """A reporter of the test site who is also a reporter of a second one: a session for each."""
+    email, up = sign_up(client)
+    site_b = "SITE-B-" + uuid.uuid4().hex[:8]
+    owner.execute("INSERT INTO cbm_app.sites(id,name) VALUES (%s,'Second site')", [site_b])
+    membership_b = owner.execute("INSERT INTO cbm_app.memberships(user_id,site_id,role,status,decided_at) "
+                                 "VALUES (%s,%s,'USER','ACTIVE',clock_timestamp()) RETURNING id",
+                                 [up.json()["user"]["id"], site_b]).fetchone()[0]
+    login = client.post("/v1/auth/login", json={"email": email, "password": "long-enough-1", "device": device(40)}).json()
+    assert client.post("/v1/auth/role", headers=auth(login["token"]),
+                       json={"membership_id": str(membership_b)}).status_code == 200
+    return up.json()["token"], login["token"], site_b
+
+
+def test_a_photo_cannot_join_a_report_of_another_site(client, owner):
+    """Third audit 2026-09-25, finding 6: the building matched the session, the report did not."""
+    token_a, token_b, site_b = two_site_reporter(client, owner)
+    image_a = jpeg(960, 1280, b"site A photo")
+    meta_a = metadata(image_a)
+    assert post(client, token_a, meta_a, image_a).status_code == 202
+    image_b = jpeg(960, 1280, b"site B photo")
+    joined = post(client, token_b, metadata(image_b, building_id=site_b, report_id=meta_a["report_id"]), image_b)
+    assert joined.status_code == 422 and joined.json()["error"] == "SITE_MISMATCH", joined.text
+    # Nor as a replay of the site A photo, sent under the site B session.
+    replay = post(client, token_b, dict(meta_a, building_id=site_b), image_a)
+    assert replay.status_code == 422 and replay.json()["error"] == "SITE_MISMATCH", replay.text
+    assert owner.execute("SELECT r.site_id, count(*) FROM cbm_app.reports r JOIN cbm_app.report_photos p ON p.report_id=r.id "
+                         "WHERE r.id=%s GROUP BY r.site_id", [meta_a["report_id"]]).fetchone() == (SITE, 1)
+    # At its own site the report takes photos as before.
+    assert post(client, token_a, meta_a, image_a).status_code == 200
+    other = jpeg(960, 1280, b"second site A photo")
+    assert post(client, token_a, metadata(other, report_id=meta_a["report_id"]), other).status_code == 202
 
 
 def test_upload_size_limit(client):

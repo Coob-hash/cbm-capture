@@ -148,7 +148,7 @@ DO $$ DECLARE r jsonb; mids jsonb; BEGIN
 END $$;
 
 -- 7. Google: sign-up, login, linking, unverified email --------------------------------------------
-DO $$ DECLARE r jsonb; BEGIN
+DO $$ DECLARE r jsonb; claimed text; BEGIN
  ASSERT cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','device',pg_temp.dev(6),
    'google',jsonb_build_object('subject','g-1','email','g@example.com','email_verified',false)))->>'status'='INVALID_GOOGLE_IDENTITY', 'unverified Google email refused';
  r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','device',pg_temp.dev(6),
@@ -157,9 +157,30 @@ DO $$ DECLARE r jsonb; BEGIN
  ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-1','email','g@example.com','email_verified',true)))->>'status'='OK', 'Google login';
  ASSERT cbm_app.login(jsonb_build_object('email','g@example.com','password','anything-123','device',pg_temp.dev(6)))->>'status'='INVALID_CREDENTIALS', 'no password login for a Google-only account';
  ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-2','email','new@example.com','email_verified',true)))->>'status'='NO_ACCOUNT', 'unknown Google user must sign up';
- r := cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-3','email','reporter@example.com','email_verified',true)));
+ -- A password sign-up only claims an address; Google proves who owns the mailbox. Linking the two
+ -- ends what the claim left behind: its password and its sessions (third audit 2026-09-25, finding 2).
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','email','claimed@example.com',
+   'password','chosen-by-whoever','device',pg_temp.dev(6)));
+ claimed := r->>'token';
+ r := cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-3','email','Claimed@example.com','email_verified',true)));
  ASSERT r->>'status'='OK' AND (SELECT user_id FROM cbm_app.external_identities WHERE subject='g-3')=(r#>>'{user,id}')::uuid, 'verified Google email links to the password account';
- ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-4','email','reporter@example.com','email_verified',true)))->>'status'='ACCOUNT_EXISTS', 'second Google identity refused';
+ ASSERT cbm_app.authenticate(r->>'token',ARRAY['USER']) IS NOT NULL, 'the owner''s session works';
+ ASSERT cbm_app.authenticate(claimed,ARRAY['USER']) IS NULL AND cbm_app.me(claimed) IS NULL, 'the session opened with the password has ended';
+ ASSERT cbm_app.login(jsonb_build_object('email','claimed@example.com','password','chosen-by-whoever','device',pg_temp.dev(6)))->>'status'='INVALID_CREDENTIALS',
+  'the password chosen at sign-up no longer logs in';
+ ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.password_credentials WHERE user_id=(r#>>'{user,id}')::uuid), 'no password is kept';
+ ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-3','email','claimed@example.com','email_verified',true)))->>'status'='OK',
+  'the owner logs in with Google again';
+ ASSERT cbm_app.authenticate(r->>'token',ARRAY['USER']) IS NOT NULL, 'and a second Google login ends nothing';
+ ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-4','email','claimed@example.com','email_verified',true)))->>'status'='ACCOUNT_EXISTS', 'second Google identity refused';
+ -- A disabled account is not linked, and keeps what it has.
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','email','disabled@example.com',
+   'password','long-enough-1','device',pg_temp.dev(6)));
+ UPDATE cbm_app.users SET status='DISABLED' WHERE email='disabled@example.com';
+ ASSERT cbm_app.login(jsonb_build_object('device',pg_temp.dev(6),'google',jsonb_build_object('subject','g-5','email','disabled@example.com','email_verified',true)))->>'status'='DISABLED'
+  AND NOT EXISTS (SELECT 1 FROM cbm_app.external_identities WHERE subject='g-5')
+  AND EXISTS (SELECT 1 FROM cbm_app.password_credentials c JOIN cbm_app.users u ON u.id=c.user_id WHERE u.email='disabled@example.com'),
+  'a disabled account is not linked';
 END $$;
 
 -- 8. Reporter capture, as WF1 will run it: claim -> store -> NOTIFY/sweep -> intake claim -> outcome ----
@@ -261,6 +282,24 @@ DO $$ DECLARE r jsonb; item jsonb; bad jsonb; c1 text:='11111111-1111-4111-8111-
  ASSERT cbm_app.claim_capture(r->>'token',pg_temp.capture('33333333-3333-4333-8333-333333333333',rep,960,1280,500))->>'status'='NOT_FOUND', 'foreign report id';
  ASSERT cbm_app.store_capture(r->>'token',jsonb_build_object('capture_id',c1))->>'status'='NOT_FOUND', 'foreign capture';
  ASSERT jsonb_array_length(cbm_app.reporter_reports(r->>'token')->'reports')=0, 'other reporter sees nothing';
+ -- A report is one site's: a person with two sites cannot add a photo taken under one to a report
+ -- of the other, as a new photo or as a replay (third audit 2026-09-25, finding 6).
+ INSERT INTO cbm_app.sites(id,name) VALUES ('SECOND-SITE','Second building');
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','email','two.sites@example.com','password','long-enough-1','device',pg_temp.dev(8)));
+ tok := r->>'token';
+ ASSERT cbm_app.claim_capture(tok,pg_temp.capture('55555555-5555-4555-8555-555555555555','cccccccc-cccc-4ccc-8ccc-cccccccccccc',960,1280,500))->>'status'='UPLOAD', 'a report at the first site';
+ PERFORM cbm_app.store_capture(tok,jsonb_build_object('capture_id','55555555-5555-4555-8555-555555555555'));
+ INSERT INTO cbm_app.memberships(user_id,site_id,role,status,decided_at)
+ VALUES ((r#>>'{user,id}')::uuid,'SECOND-SITE','USER','ACTIVE',clock_timestamp());
+ r := cbm_app.login(jsonb_build_object('email','two.sites@example.com','password','long-enough-1','device',pg_temp.dev(8)));
+ PERFORM cbm_app.select_membership(r->>'token',(SELECT id FROM cbm_app.memberships WHERE site_id='SECOND-SITE' AND user_id=(r#>>'{user,id}')::uuid));
+ ASSERT cbm_app.claim_capture(r->>'token',pg_temp.capture('66666666-6666-4666-8666-666666666666','cccccccc-cccc-4ccc-8ccc-cccccccccccc',960,1280,500)
+   ||'{"building_id":"SECOND-SITE"}')->>'status'='SITE_MISMATCH', 'a photo cannot join a report of another site';
+ ASSERT cbm_app.claim_capture(r->>'token',pg_temp.capture('55555555-5555-4555-8555-555555555555','cccccccc-cccc-4ccc-8ccc-cccccccccccc',960,1280,500)
+   ||'{"building_id":"SECOND-SITE"}')->>'status'='SITE_MISMATCH', 'nor be replayed into one';
+ ASSERT (SELECT count(*) FROM cbm_app.report_photos WHERE report_id='cccccccc-cccc-4ccc-8ccc-cccccccccccc')=1, 'the report keeps its one photo';
+ ASSERT cbm_app.claim_capture(tok,pg_temp.capture('55555555-5555-4555-8555-555555555555','cccccccc-cccc-4ccc-8ccc-cccccccccccc',960,1280,500))->>'status'='DUPLICATE',
+  'at its own site the replay is a duplicate, as before';
 END $$;
 
 -- 10. The FM's decisions from the app: the workflows' own guards, one channel more ----------------
@@ -565,15 +604,21 @@ DO $$ DECLARE r jsonb; rid uuid; tid int:=pg_temp.get('ticket')::int; BEGIN
  ASSERT cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256','nope'))->>'status'='INVALID',
   'the PDF hash is checked';
  r := cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)));
- ASSERT r->>'status'='SUBMITTED' AND r->>'submission_id' IS NOT NULL, 'claimed through the workflows: '||r;
+ ASSERT r->>'status'='SUBMITTED' AND r->>'submission_id' IS NOT NULL AND (r->>'proceed')::boolean, 'claimed through the workflows: '||r;
  ASSERT (SELECT status FROM cbm_app.technician_reports WHERE id=rid)='SUBMITTED', 'and recorded here';
  ASSERT (SELECT pdf_sha256 FROM public.cbm_technician_submissions WHERE id=(r->>'submission_id')::uuid)=repeat('e',64),
   'the workflows hold the report and its hash';
  ASSERT (SELECT report->>'work_performed' FROM public.cbm_technician_submissions WHERE id=(r->>'submission_id')::uuid) IS NOT NULL,
   'with the fields the technician wrote';
- -- One approval cycle takes one report: a second claim is refused, and said to be refused.
- ASSERT cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)))->>'status'='SUBMITTED',
+ -- Claiming it again before the approval cycle has it (a run that stopped after the claim, resumed
+ -- by the sweep) answers with the same claim, and WF2 carries on.
+ ASSERT cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)))
+   @> jsonb_build_object('status','SUBMITTED','proceed',true,'resumed',true,'submission_id',r->>'submission_id'),
   'claiming twice answers with the first claim';
+ -- Once the approval cycle has it, there is nothing left to do.
+ UPDATE public.tickets SET status='PENDING_APPROVAL', approval_id=gen_random_uuid() WHERE id=tid;
+ ASSERT NOT (cbm_app.record_app_report_submission(jsonb_build_object('report_id',rid,'pdf_sha256',repeat('e',64)))->>'proceed')::boolean,
+  'a report the approval cycle has is not assessed again';
 END $$;
 
 -- 14. The API's login reaches data only through its entry functions --------------------------------
@@ -601,6 +646,10 @@ DO $$ DECLARE r jsonb; BEGIN
  BEGIN PERFORM cbm_app.cycle_report(1); RAISE EXCEPTION 'API login read a report through the cycle helper';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN PERFORM cbm_app.report_content('{}',NULL,NULL); RAISE EXCEPTION 'API login called the report helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.claim_awaits_approval(NULL::cbm_app.technician_reports); RAISE EXCEPTION 'API login called the claim helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.record_app_report_submission('{}'); RAISE EXCEPTION 'API login claimed a report for WF2';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN PERFORM public.cbm_intake_recover(); RAISE EXCEPTION 'API login ran a workflow function';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;

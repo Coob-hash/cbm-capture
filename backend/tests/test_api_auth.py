@@ -206,6 +206,27 @@ def test_google_sign_up_and_login(client, monkeypatch):
     assert r.status_code == 404 and r.json()["error"] == "NO_ACCOUNT"
 
 
+def test_google_login_ends_what_a_password_sign_up_for_the_address_left(client, monkeypatch):
+    """Third audit 2026-09-25, finding 2: someone registers another person's address with a password
+    of their choosing; the owner later logs in with Google, which links to that account."""
+    email = new_email()
+    _, squatter = sign_up(client, email=email, password="chosen-by-someone", dev=61)
+    assert squatter.status_code == 201
+    monkeypatch.setattr(google_id, "verify", lambda token, ids: {
+        "subject": "owner-" + email, "email": email, "email_verified": True, "name": "Mailbox owner"})
+    owner_login = client.post("/v1/auth/login/google", json={"id_token": "t", "device": device(62)})
+    assert owner_login.status_code == 200, owner_login.text
+    owner_token = owner_login.json()["token"]
+    # The session opened with the password is over, and the password no longer logs in.
+    assert client.get("/v1/reports", headers=auth(squatter.json()["token"])).status_code == 401
+    again = client.post("/v1/auth/login", json={"email": email, "password": "chosen-by-someone", "device": device(61)})
+    assert again.status_code == 401 and again.json()["error"] == "INVALID_CREDENTIALS"
+    # The owner's session works, and logging in with Google again ends nothing.
+    assert client.get("/v1/reports", headers=auth(owner_token)).status_code == 200
+    assert client.post("/v1/auth/login/google", json={"id_token": "t", "device": device(63)}).status_code == 200
+    assert client.get("/v1/reports", headers=auth(owner_token)).status_code == 200
+
+
 def test_google_rejections(client, monkeypatch):
     def bad(token, ids):
         raise google_id.GoogleTokenError("expired")

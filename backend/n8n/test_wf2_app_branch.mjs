@@ -48,16 +48,33 @@ check('tick -> Sweep App Reports -> Extract Ticket ID',
   JSON.stringify(targets(after, 'Sweep App Reports')) === '["Extract Ticket ID"]');
 check('an accepted ticket asks where the PDF comes from',
   JSON.stringify(targets(after, 'Ticket Open and Assigned?')) === '["App Report?"]');
-check('app -> render, Drive -> download, both -> the extraction',
+check('app -> render -> claim -> claimed? -> the extraction; Drive -> download -> the extraction',
   JSON.stringify(targets(after, 'App Report?', 0)) === '["Render Report PDF"]' &&
   JSON.stringify(targets(after, 'App Report?', 1)) === '["Download Report PDF"]' &&
-  JSON.stringify(targets(after, 'Render Report PDF')) === '["Extract Report Text and Photo"]' &&
+  JSON.stringify(targets(after, 'Render Report PDF')) === '["Record App Submission"]' &&
+  JSON.stringify(targets(after, 'Record App Submission')) === '["App Report Claimed?"]' &&
+  JSON.stringify(targets(after, 'App Report Claimed?')) === '["Extract Report Text and Photo"]' &&
   JSON.stringify(targets(after, 'Download Report PDF')) === '["Extract Report Text and Photo"]');
-check('only an app report is claimed, and both paths reach the approval cycle',
-  JSON.stringify(targets(after, 'Set Pending Approval')) === '["Claim App Report?"]' &&
-  JSON.stringify(targets(after, 'Claim App Report?', 0)) === '["Record App Submission"]' &&
-  JSON.stringify(targets(after, 'Claim App Report?', 1)) === '["Approval Cycle"]' &&
-  JSON.stringify(targets(after, 'Record App Submission')) === '["Approval Cycle"]');
+// Third audit 2026-09-25, finding 1: the claim ran after 'Set Pending Approval', and the node that
+// recorded it stood between that and 'Approval Cycle'.
+check("'Set Pending Approval' still feeds 'Approval Cycle' directly",
+  JSON.stringify(targets(after, 'Set Pending Approval')) === '["Approval Cycle"]');
+const reachable = (wf, from, without = null) => {
+  const seen = new Set([from]); const todo = [from];
+  while (todo.length) {
+    for (const t of (wf.connections[todo.pop()]?.main || []).flat().filter(Boolean).map((x) => x.node)) {
+      if (t !== without && !seen.has(t)) { seen.add(t); todo.push(t); }
+    }
+  }
+  return seen;
+};
+check('on the app path the claim comes before the ticket is moved on',
+  reachable(after, 'Render Report PDF').has('Set Pending Approval') &&
+  !reachable(after, 'Render Report PDF', 'Record App Submission').has('Set Pending Approval') &&
+  !reachable(after, 'Set Pending Approval').has('Record App Submission'));
+check('the Drive path never meets the claim',
+  !reachable(after, 'Download Report PDF').has('Record App Submission') &&
+  !reachable(after, 'Completed Upload (Drive Trigger)', 'App Report?').has('Record App Submission'));
 
 const changed = before.nodes.filter((b) => {
   const a = node(after, b.name);
@@ -123,6 +140,33 @@ check('it checks that what came back is a PDF and hashes it',
   render.includes("'%PDF-'") && render.includes("createHash('sha256')"));
 check('it hands the document on as binary the extraction can read',
   render.includes('prepareBinaryData') && render.includes('binary: {data:'));
+
+// ---- The hand-off to the approval cycle, run with the nodes' own code ---------------------------
+// The database half (record_app_report_submission, then the release's 'Set Pending Approval' query)
+// runs in backend/tests/test_api_decisions.py; here each node's code gets what the node before it
+// returns: the renderer's item, the claim's row, the ticket row 'Set Pending Approval' returns.
+console.log('the hand-off to the approval cycle');
+const rendered = {json: {app_report_id: 'r-1', ticket_id: 42, pdf_sha256: 'e'.repeat(64), pdf_bytes: 1234},
+  binary: {data: {mimeType: 'application/pdf', fileName: 'TICKET-42.pdf', id: 'filesystem-v2:rendered'}}};
+const expression = (value, $json) => new Function('$json', 'return ' + value.replace(/^=\{\{/, '').replace(/\}\}$/, ''))($json);
+const claimArgs = expression(node(after, 'Record App Submission').parameters.options.queryReplacement, rendered.json);
+check('the claim is asked for the rendered report and its hash',
+  JSON.stringify(claimArgs) === JSON.stringify([JSON.stringify({report_id: 'r-1', pdf_sha256: 'e'.repeat(64)})]), claimArgs);
+const claimed = (result) => new Function('$input', '$', node(after, 'App Report Claimed?').parameters.jsCode)(
+  {first: () => ({json: {result}})}, (name) => ({first: () => (name === 'Render Report PDF' ? rendered : null)}));
+const taken = claimed({status: 'SUBMITTED', proceed: true, report_id: 'r-1', submission_id: 's-1', ticket_id: 42});
+check('a claimed report goes on to the extraction, with the rendered PDF',
+  taken.length === 1 && taken[0].binary.data.id === 'filesystem-v2:rendered' && taken[0].json.ticket_id === 42, taken);
+check('a resumed claim goes on too', claimed({status: 'SUBMITTED', proceed: true, resumed: true}).length === 1);
+check('a report the workflows did not take stops there',
+  claimed({status: 'NOT_PROCESSED', proceed: false, report_id: 'r-1'}).length === 0 &&
+  claimed({status: 'SUBMITTED', proceed: false}).length === 0 && claimed(undefined).length === 0);
+const approvalCycle = new Function('$json', node(after, 'Approval Cycle').parameters.jsCode);
+const cycle = approvalCycle({id: 42, status: 'PENDING_APPROVAL', approval_id: '00000000-0000-4000-8000-000000000001'});
+check("'Approval Cycle' starts from the row 'Set Pending Approval' returns",
+  cycle.length === 1 && cycle[0].json.ticketId === 42 && cycle[0].json.approvalId === '00000000-0000-4000-8000-000000000001', cycle);
+check("and would start nothing from the claim's row, which is why nothing stands between them",
+  approvalCycle({result: {status: 'SUBMITTED', report_id: 'r-1', ticket_id: 42}}).length === 0);
 
 console.log(failed === 0 ? '\nall checks passed' : `\n${failed} check(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

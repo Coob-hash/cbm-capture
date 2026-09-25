@@ -445,3 +445,126 @@ def test_after_a_rework_a_new_report_is_written(client, owner):
     assert second.status_code == 202, second.text
     assert second.json()["report_id"] != first.json()["report_id"]
     assert job_card(client, token, tid)["report_state"] == "PROCESSING"
+
+
+# ---- WF2 takes a report written in the app (third audit 2026-09-25, finding 1) -------------------
+# The branch (backend/n8n/wf2_app_branch.py) runs Render Report PDF -> Record App Submission ->
+# the assessment -> Set Pending Approval -> Approval Cycle. These tests run its database half in
+# that order: the claim while the job is still the technician's to report, then the approval cycle.
+
+# WF2's 'Set Pending Approval', as in the workflow release (parameters reordered for psycopg: the
+# ticket id last). Its RETURNING row is what 'Approval Cycle' requires: an integer id and an approval_id.
+SET_PENDING_APPROVAL = (
+    "UPDATE tickets SET status='PENDING_APPROVAL',report_text=%s,report_file_id=%s,after_file_id=%s,"
+    " verification=%s::jsonb,approval_id=gen_random_uuid(),ifc_new_version=NULL,updated_at=clock_timestamp()"
+    " WHERE id=%s AND status IN ('ASSIGNED','WORK_DONE','REWORK') AND technician_id IS NOT NULL"
+    " RETURNING id,status,approval_id")
+
+
+def dispatched_ticket(owner, tech_id: int) -> int:
+    """An assigned ticket as dispatch leaves it: the technician's accepted offer is in its dispatch
+    state, which the workflows' report link - and so WF2's claim - is issued from."""
+    tid = assigned_ticket(owner, tech_id)
+    owner.execute("INSERT INTO public.ticket_events(ticket_id,event,payload) VALUES (%s,'CBM_DISPATCH_STATE',%s)",
+                  [tid, json.dumps({"status": "ASSIGNED", "offers": [
+                      {"id": f"a-{tid}", "token": "c" * 64, "technician_id": tech_id, "status": "ACCEPTED",
+                       "expires_at": "2099-01-01T00:00:00Z"}]})])
+    return tid
+
+
+def wf2_claims(owner, report_id: str) -> dict:
+    """'Record App Submission', with the hash of the PDF 'Render Report PDF' made."""
+    return owner.execute("SELECT cbm_app.record_app_report_submission(%s::jsonb)",
+                         [json.dumps({"report_id": report_id, "pdf_sha256": "e" * 64})]).fetchone()[0]
+
+
+def wf2_sets_pending_approval(owner, ticket_id: int):
+    return owner.execute(SET_PENDING_APPROVAL, ["Report text", None, None, json.dumps({"source": "REPORT"}),
+                                                ticket_id]).fetchone()
+
+
+def swept(owner) -> list[str]:
+    return [r[0] for r in owner.execute("SELECT x->>'report_id' FROM cbm_app.reports_for_wf2(NULL, 10) x").fetchall()]
+
+
+def test_wf2_claims_an_app_report_before_it_moves_the_job_on(client, owner):
+    token, tech_id = technician(client, owner, dev=64)
+    tid = dispatched_ticket(owner, tech_id)
+    fields = report_fields()
+    sent = send_report(client, token, tid, fields)
+    assert sent.status_code == 202, sent.text
+    report_id = sent.json()["report_id"]
+    item = owner.execute("SELECT x FROM cbm_app.reports_for_wf2(%s) x", [report_id]).fetchone()[0]
+    assert item["ticket_id"] == tid
+    # The claim, while the ticket is still ASSIGNED: this cycle's report, in the workflows' own table.
+    claim = wf2_claims(owner, report_id)
+    assert claim["status"] == "SUBMITTED" and claim["proceed"] is True and claim["ticket_id"] == tid, claim
+    assert owner.execute("SELECT approval_cycle FROM public.cbm_technician_submissions WHERE id=%s",
+                         [claim["submission_id"]]).fetchone()[0] == "initial"
+    # Then the approval cycle, whose input is the ticket with its new approval_id.
+    row = wf2_sets_pending_approval(owner, tid)
+    assert row is not None and row[0] == tid and row[1] == "PENDING_APPROVAL" and row[2] is not None
+    # The technician's side: sent, with the facility manager; a lost answer still gets its receipt.
+    assert client.get(f"/v1/technician/jobs/{tid}/report", headers=auth(token)).json()["sent"] is True
+    assert job_card(client, token, tid)["report_state"] == "WITH_FM"
+    retry = send_report(client, token, tid, fields)
+    assert retry.status_code == 202 and retry.json()["report_id"] == report_id, retry.text
+    # WF2 does not take it again.
+    assert owner.execute("SELECT count(*) FROM cbm_app.reports_for_wf2(%s) x", [report_id]).fetchone()[0] == 0
+    assert wf2_claims(owner, report_id)["proceed"] is False
+
+
+def test_a_claim_the_workflows_refuse_stops_wf2_with_its_reason(client, owner):
+    token, tech_id = technician(client, owner, dev=65)
+    tid = dispatched_ticket(owner, tech_id)
+    report_id = send_report(client, token, tid, report_fields()).json()["report_id"]
+    # This cycle already has a report, from the browser portal.
+    owner.execute("INSERT INTO public.cbm_technician_submissions(ticket_id,approval_cycle,technician_id,pdf_sha256,report) "
+                  "VALUES (%s,'initial',%s,%s,'{}')", [tid, tech_id, "d" * 64])
+    claim = wf2_claims(owner, report_id)
+    assert claim["status"] == "NOT_PROCESSED" and claim["proceed"] is False, claim
+    status, outcome = owner.execute("SELECT status, intake_result FROM cbm_app.technician_reports WHERE id=%s",
+                                    [report_id]).fetchone()
+    assert status == "NOT_PROCESSED" and outcome["claim"]["status"] == "UNCONFIRMED"
+    assert report_id not in swept(owner)
+
+
+def test_a_run_that_stops_after_the_claim_is_taken_up_again(client, owner):
+    token, tech_id = technician(client, owner, dev=66)
+    tid = dispatched_ticket(owner, tech_id)
+    report_id = send_report(client, token, tid, report_fields()).json()["report_id"]
+    # First in the sweep's order, whatever else the suite has left waiting.
+    owner.execute("UPDATE cbm_app.technician_reports SET stored_at=stored_at-interval '1 day' WHERE id=%s", [report_id])
+    first = wf2_claims(owner, report_id)
+    assert first["proceed"] is True
+    # The assessment fails: the ticket never reaches 'Set Pending Approval'. The sweep leaves the run
+    # ten minutes, then offers the report again, and the claim that run made stands.
+    assert report_id not in swept(owner)
+    age = "UPDATE cbm_app.technician_reports SET intake_checked_at=intake_checked_at-interval '11 minutes' WHERE id=%s"
+    owner.execute(age, [report_id])
+    assert report_id in swept(owner)
+    again = wf2_claims(owner, report_id)
+    assert again["proceed"] is True and again["resumed"] is True and again["submission_id"] == first["submission_id"]
+    assert report_id not in swept(owner), "not offered again straight away"
+    assert client.get(f"/v1/technician/jobs/{tid}/report", headers=auth(token)).json()["sent"] is True
+    # Once the approval cycle has it, it is done.
+    assert wf2_sets_pending_approval(owner, tid) is not None
+    owner.execute(age, [report_id])
+    assert report_id not in swept(owner)
+    assert wf2_claims(owner, report_id)["proceed"] is False
+
+
+def test_a_report_from_an_earlier_round_is_not_claimed_for_the_next(client, owner):
+    token, tech_id = technician(client, owner, dev=67)
+    tid = dispatched_ticket(owner, tech_id)
+    report_id = send_report(client, token, tid, report_fields()).json()["report_id"]
+    # Before WF2 took it, the job went before the FM another way and was sent back: a new round.
+    owner.execute("UPDATE public.tickets SET status='PENDING_APPROVAL', approval_id=gen_random_uuid() WHERE id=%s", [tid])
+    owner.execute("UPDATE public.tickets SET status='REWORK' WHERE id=%s", [tid])
+    claim = wf2_claims(owner, report_id)
+    assert claim["status"] == "NOT_PROCESSED" and claim["proceed"] is False, claim
+    assert owner.execute("SELECT intake_result->>'reason' FROM cbm_app.technician_reports WHERE id=%s",
+                         [report_id]).fetchone()[0] == "The report was written for an earlier round of this job"
+    assert owner.execute("SELECT count(*) FROM public.cbm_technician_submissions WHERE ticket_id=%s",
+                         [tid]).fetchone()[0] == 0
+    assert job_card(client, token, tid)["report_needed"] is True

@@ -1,7 +1,8 @@
 -- CBM App schema. Owned by the app, not by the workflows: everything lives in schema cbm_app, next
 -- to the workflows' public schema in the same database. Repeatable (IF NOT EXISTS / OR REPLACE).
 --
--- Accounts log in with email + password (bcrypt, pgcrypto) or Google. A login opens a session that
+-- Accounts log in with email + password (bcrypt, pgcrypto) or Google; a Google login for an address
+-- a password account holds takes that account over from the password (see login). A login opens a session that
 -- lasts exactly one hour and is never extended. The role lives on a site membership: USER and
 -- TECHNICIAN are active at sign-up (the app is open to anyone who has the site's code); FM waits
 -- for approval by the operator, and so does a password sign-up that would take over an existing
@@ -360,12 +361,21 @@ BEGIN
   SELECT u2.* INTO u FROM external_identities i JOIN users u2 ON u2.id=i.user_id
   WHERE i.provider='GOOGLE' AND i.subject=g->>'subject' FOR UPDATE OF u2;
   IF u.id IS NULL THEN
-   -- A verified Google address may link to an existing password account with the same email.
+   -- A verified Google address may link to an existing password account with the same email. A
+   -- password sign-up only claims an address; Google has now proved who owns the mailbox. So what
+   -- the claim left behind ends here: the password, which whoever registered the address chose,
+   -- and every session opened with it. Otherwise someone who registered another person's address
+   -- first would keep logging in, and a session of theirs would read what the owner writes from now
+   -- on. The account signs in with Google from here on. A disabled account is not linked.
    SELECT * INTO u FROM users WHERE email=v_email FOR UPDATE;
    IF u.id IS NULL THEN RETURN jsonb_build_object('status','NO_ACCOUNT'); END IF;
-   INSERT INTO external_identities(provider,subject,user_id,email)
-   VALUES ('GOOGLE',g->>'subject',u.id,v_email) ON CONFLICT DO NOTHING;
-   IF NOT FOUND THEN RETURN jsonb_build_object('status','ACCOUNT_EXISTS'); END IF;
+   IF u.status = 'ACTIVE' THEN
+    INSERT INTO external_identities(provider,subject,user_id,email)
+    VALUES ('GOOGLE',g->>'subject',u.id,v_email) ON CONFLICT DO NOTHING;
+    IF NOT FOUND THEN RETURN jsonb_build_object('status','ACCOUNT_EXISTS'); END IF;
+    DELETE FROM password_credentials WHERE user_id=u.id;
+    UPDATE sessions SET revoked_at=clock_timestamp() WHERE user_id=u.id AND revoked_at IS NULL;
+   END IF;
   END IF;
  ELSE
   v_method := 'PASSWORD';
@@ -537,15 +547,19 @@ BEGIN
  IF length(v_text) > 500 THEN RETURN jsonb_build_object('status','DESCRIPTION_TOO_LONG'); END IF;
  cid := (p->>'capture_id')::uuid; rid := (p->>'report_id')::uuid;
  PERFORM pg_advisory_xact_lock(hashtextextended('cbm-app-report:'||rid,0));
+ -- A report is one site's: its photos, and the intake they start, are routed under that site. The
+ -- building above is the session's; the report must be too, or a person with two sites could add a
+ -- photo taken under one to the other's report. Checked for a replay as well as a new photo.
+ SELECT * INTO r FROM reports WHERE id=rid;
  SELECT * INTO ph FROM report_photos WHERE capture_id=cid;
  IF ph.capture_id IS NOT NULL THEN
-  IF ph.report_id <> rid OR NOT EXISTS (SELECT 1 FROM reports WHERE id=rid AND user_id=(a->>'user_id')::uuid)
+  IF ph.report_id <> rid OR r.user_id IS DISTINCT FROM (a->>'user_id')::uuid
    OR ph.image_sha256 IS DISTINCT FROM lower(p#>>'{image,sha256}') THEN
    RETURN jsonb_build_object('status','CONFLICT'); END IF;
+  IF r.site_id <> a->>'site_id' THEN RETURN jsonb_build_object('status','SITE_MISMATCH'); END IF;
   RETURN jsonb_build_object('status',CASE WHEN ph.status='RECEIVED' THEN 'UPLOAD' ELSE 'DUPLICATE' END,
    'capture_id',cid,'report_id',rid,'photo_status',ph.status);
  END IF;
- SELECT * INTO r FROM reports WHERE id=rid;
  IF r.id IS NULL THEN
   -- A report id already used by the Drive intake (or anyone else) cannot be adopted.
   IF EXISTS (SELECT 1 FROM public.cbm_intake_reports WHERE id=rid) THEN RETURN jsonb_build_object('status','NOT_FOUND'); END IF;
@@ -553,6 +567,8 @@ BEGIN
   VALUES (rid,(a->>'user_id')::uuid,(a->>'membership_id')::uuid,a->>'site_id',v_text);
  ELSIF r.user_id <> (a->>'user_id')::uuid THEN
   RETURN jsonb_build_object('status','NOT_FOUND');
+ ELSIF r.site_id <> a->>'site_id' THEN
+  RETURN jsonb_build_object('status','SITE_MISMATCH');
  END IF;
  BEGIN
   INSERT INTO report_photos(capture_id,report_id,note,image_sha256,image_width,image_height,

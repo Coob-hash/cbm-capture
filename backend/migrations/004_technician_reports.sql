@@ -221,8 +221,22 @@ BEGIN
  RETURN jsonb_build_object('status','STORED','report_id',r.id,'ticket_id',r.ticket_id);
 END $$;
 
+-- A report WF2 has claimed (record_app_report_submission) whose run stopped before the approval cycle
+-- took it: the workflows hold its submission for the cycle the ticket is still in, and the ticket is
+-- still the technician's to report. The claim stands; the rest of the run is what is missing.
+CREATE OR REPLACE FUNCTION cbm_app.claim_awaits_approval(r cbm_app.technician_reports) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
+ SELECT r.status = 'SUBMITTED' AND EXISTS (
+   SELECT 1 FROM public.cbm_technician_submissions s JOIN public.tickets t ON t.id = s.ticket_id
+   WHERE s.id = r.submission_id AND s.ticket_id = r.ticket_id AND t.status IN ('ASSIGNED','REWORK')
+     AND s.approval_cycle = coalesce(t.approval_id::text,'initial'))
+$$;
+
 -- For WF2 (not granted to the API). Without an id: the sweep — reports the notification missed,
--- older than two minutes, and reports WF2 left unfinished, retried after ten.
+-- older than two minutes, and reports WF2 left unfinished, retried after ten: stored ones it never
+-- recorded an outcome for, and claimed ones whose ticket never reached the approval cycle (the
+-- assessment failed, say). WF2 claims a report before assessing it, so a run that stops after the
+-- claim would otherwise leave the job with the office's claim and no review, for good.
 CREATE OR REPLACE FUNCTION cbm_app.reports_for_wf2(p_report uuid DEFAULT NULL, p_limit integer DEFAULT 1)
 RETURNS SETOF jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
@@ -233,10 +247,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = cbm_app, public, pg_temp 
      'storage_ref',r.storage_ref,'caption',r.photo_caption,'sha256',r.photo_sha256) END,
    'stored_at',r.stored_at)
  FROM technician_reports r
- WHERE r.status='STORED'
-   AND (p_report IS NOT NULL AND r.id = p_report
-        OR p_report IS NULL AND (r.intake_checked_at IS NULL AND r.stored_at < clock_timestamp()-interval '2 minutes'
-                                 OR r.intake_checked_at < clock_timestamp()-interval '10 minutes'))
+ WHERE (r.status='STORED'
+        AND (p_report IS NOT NULL AND r.id = p_report
+             OR p_report IS NULL AND (r.intake_checked_at IS NULL AND r.stored_at < clock_timestamp()-interval '2 minutes'
+                                      OR r.intake_checked_at < clock_timestamp()-interval '10 minutes')))
+    OR (p_report IS NULL AND r.status='SUBMITTED' AND r.intake_checked_at < clock_timestamp()-interval '10 minutes'
+        AND claim_awaits_approval(r))
  ORDER BY r.stored_at
  LIMIT greatest(1, least(coalesce(p_limit,1), 10))
 $$;
@@ -259,35 +275,60 @@ BEGIN
  RETURN jsonb_build_object('status','OK','report_id',r.id);
 END $$;
 
--- WF2 calls this once it has rendered the PDF: the report is claimed through the workflows' own
--- submission function, so one approval cycle still takes exactly one report, and the outcome is
--- written back here. p: {report_id, pdf_sha256}
+-- WF2 calls this once it has rendered the PDF, before it assesses the report: the report is claimed
+-- through the workflows' own submission function, so one approval cycle still takes exactly one
+-- report, and the outcome is written back here. p: {report_id, pdf_sha256}
+--
+-- The claim is made while the ticket is still the technician's to report (ASSIGNED, REWORK): the
+-- report belongs to that cycle, and only then does the workflows' report link exist. WF2's 'Set
+-- Pending Approval' moves the ticket on and opens the next cycle, so it comes after this node. It
+-- used to come before: the claim then found the job closed, and every app report was dropped.
+--
+-- 'proceed' tells WF2 whether to assess the report: true when this cycle's report is claimed, now or
+-- by an earlier run that stopped before the approval cycle took it; false otherwise, with the reason
+-- recorded on the report (the app then shows the job as still to report).
 CREATE OR REPLACE FUNCTION cbm_app.record_app_report_submission(p jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
-DECLARE r technician_reports; link jsonb; claim jsonb;
+DECLARE r technician_reports; t public.tickets%ROWTYPE; link jsonb; claim jsonb;
 BEGIN
  SELECT * INTO r FROM technician_reports WHERE id=(p->>'report_id')::uuid FOR UPDATE;
- IF r.id IS NULL THEN RETURN jsonb_build_object('status','NOT_FOUND'); END IF;
+ IF r.id IS NULL THEN RETURN jsonb_build_object('status','NOT_FOUND','proceed',false); END IF;
  IF r.status <> 'STORED' THEN
-  RETURN jsonb_build_object('status',r.status,'report_id',r.id,'submission_id',r.submission_id); END IF;
- IF coalesce(p->>'pdf_sha256','') !~ '^[0-9a-f]{64}$' THEN RETURN jsonb_build_object('status','INVALID'); END IF;
+  -- Claimed by a run that stopped before the approval cycle took it: the claim stands, and this run
+  -- finishes what that one started.
+  IF claim_awaits_approval(r) THEN
+   UPDATE technician_reports SET intake_checked_at=clock_timestamp() WHERE id=r.id;
+   RETURN jsonb_build_object('status','SUBMITTED','proceed',true,'resumed',true,'report_id',r.id,
+     'submission_id',r.submission_id,'ticket_id',r.ticket_id);
+  END IF;
+  RETURN jsonb_build_object('status',r.status,'proceed',false,'report_id',r.id,'submission_id',r.submission_id);
+ END IF;
+ IF coalesce(p->>'pdf_sha256','') !~ '^[0-9a-f]{64}$' THEN RETURN jsonb_build_object('status','INVALID','proceed',false); END IF;
+ SELECT * INTO t FROM public.tickets WHERE id=r.ticket_id FOR UPDATE;
+ -- Written in an earlier round of this job (it was reported another way meanwhile, and sent back):
+ -- it is not this round's report, and claiming it would give the new round an old report.
+ IF r.approval_cycle IS NOT NULL AND r.approval_cycle <> coalesce(t.approval_id::text,'initial') THEN
+  PERFORM record_report_intake(jsonb_build_object('report_id',r.id,'outcome','NOT_PROCESSED',
+    'reason','The report was written for an earlier round of this job'));
+  RETURN jsonb_build_object('status','NOT_PROCESSED','proceed',false,'report_id',r.id);
+ END IF;
  -- The workflows' own access token for this ticket; minting it is what the portal link does too.
  link := public.cbm_issue_technician_report_link(r.ticket_id);
  IF link IS NULL THEN
   PERFORM record_report_intake(jsonb_build_object('report_id',r.id,'outcome','NOT_PROCESSED',
     'reason','The job is no longer open for a report'));
-  RETURN jsonb_build_object('status','NOT_PROCESSED','report_id',r.id);
+  RETURN jsonb_build_object('status','NOT_PROCESSED','proceed',false,'report_id',r.id);
  END IF;
  claim := public.cbm_claim_technician_report(jsonb_build_object(
    'ticketId',r.ticket_id::text,'token',link->>'token','pdf_sha256',p->>'pdf_sha256','report',r.report));
  IF claim->>'status' <> 'UPLOAD' THEN
   PERFORM record_report_intake(jsonb_build_object('report_id',r.id,'outcome','NOT_PROCESSED','claim',claim));
-  RETURN jsonb_build_object('status','NOT_PROCESSED','report_id',r.id,'claim',claim);
+  RETURN jsonb_build_object('status','NOT_PROCESSED','proceed',false,'report_id',r.id,'claim',claim);
  END IF;
  PERFORM record_report_intake(jsonb_build_object('report_id',r.id,'outcome','SUBMITTED',
    'submission_id',claim->>'submissionId','claim',claim));
- RETURN jsonb_build_object('status','SUBMITTED','report_id',r.id,'submission_id',claim->>'submissionId',
-   'ticket_id',r.ticket_id);
+ RETURN jsonb_build_object('status','SUBMITTED','proceed',true,'report_id',r.id,
+   'submission_id',claim->>'submissionId','ticket_id',r.ticket_id);
 END $$;
 
 -- Whether this job's report has been sent in its current cycle (the job list reads the same
@@ -307,6 +348,7 @@ END $$;
 
 REVOKE ALL ON FUNCTION cbm_app.is_calendar_date(text), cbm_app.report_fields_valid(jsonb), cbm_app.reports_for_wf2(uuid, integer),
  cbm_app.cycle_report(integer), cbm_app.report_content(jsonb, text, text),
+ cbm_app.claim_awaits_approval(cbm_app.technician_reports),
  cbm_app.record_report_intake(jsonb), cbm_app.record_app_report_submission(jsonb) FROM PUBLIC, cbm_app_api;
 GRANT EXECUTE ON FUNCTION
  cbm_app.submit_technician_report(jsonb),
