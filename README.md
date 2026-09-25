@@ -85,7 +85,7 @@ was written to the system PATH or registry — activate them per session:
 ```powershell
 . .\tools\env.ps1          # PowerShell   (or: source tools/env.sh   in Git Bash)
 cd android
-.\gradlew.bat testDebugUnitTest         # 54 tests (:shared and :app), no device needed
+.\gradlew.bat testDebugUnitTest         # 60 tests (:shared and :app), no device needed
 .\gradlew.bat :app:assembleDebug        # -> app/build/outputs/apk/debug/app-debug.apk
 .\gradlew.bat :app:installDebug         # ARCore-supported device over USB
 ```
@@ -155,9 +155,9 @@ CI: <https://github.com/Coob-hash/cbm-capture/actions> — Android, iOS, backend
 
 | | |
 |---|---|
-| **Android** | 1.0.3 (24 Sep 2026): the merged app, one login and a home per role (reporter, technician, FM) over the App API; AR capture with a standard-camera fallback; the findings of both 24 Sep audits fixed. **54 unit tests pass** (plus the App ↔ API contract test), lint 0 errors. See [`android/README.md`](android/README.md). |
+| **Android** | 1.0.4 (25 Sep 2026): the merged app, one login and a home per role (reporter, technician, FM) over the App API; AR capture with a standard-camera fallback; the findings of the three audits of 24–25 Sep fixed. **60 unit tests pass** (plus the App ↔ API contract test), lint 0 errors. See [`android/README.md`](android/README.md). |
 | **iOS** | Compiles under Xcode 16.4 with `SWIFT_STRICT_CONCURRENCY: complete`, **17/17 tests pass** on the simulator. |
-| **Backend** | SQL suite + 67 API tests pass against the live workflow schema, through the restricted database login, including the regressions of both 24 Sep audits. The deployment runs the version before those fixes until `backend/deploy/Install-CbmApp.ps1` is run again. |
+| **Backend** | SQL suite + 77 API tests pass against the live workflow schema, through the restricted database login, including the regressions of the three audits of 24–25 Sep; the WF2 app branch's test runs its nodes' own code from the claim to the approval cycle. The deployment runs the version before those fixes until `backend/deploy/Install-CbmApp.ps1` is run again, and then the WF2 branch is re-applied (`backend/n8n/README.md`, *Applying it to the running WF2*). |
 | **Contract** | Example validates against the schema; frame invariant holds. |
 
 The iOS app is built on a GitHub-hosted `macos-15` runner, because Xcode is macOS-only — there

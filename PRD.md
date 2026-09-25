@@ -165,7 +165,9 @@ Rules that follow from the matrix:
   15 minutes; an unknown email and a wrong password get the same answer. **Google login**: the app
   obtains a Google ID token; n8n verifies its signature, audience and expiry and passes only the
   verified claims to the database. A verified Google email may link to an existing password account
-  with the same email.
+  with the same email. Google proves the mailbox; a password sign-up only claims it, so the link ends
+  that account's password and every session opened with it, and the account signs in with Google from
+  then on (audit 25 Sep, finding 2).
 - **Shared devices are allowed.** A device is not owned by anybody; any account can log in on any
   device. The app keeps each account's data (outbox, drafts, cache) separate on the device, and
   logging out removes the session token from the device.
