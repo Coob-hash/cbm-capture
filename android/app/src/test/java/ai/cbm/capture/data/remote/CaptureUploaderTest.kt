@@ -72,13 +72,24 @@ class CaptureUploaderTest {
     @Test
     fun `refusals that no retry can fix are permanent, with a readable reason`() = runTest {
         respond(422, """{"error":"FRAME_MISMATCH","message":"x"}""")
-        assertEquals(UploadOutcome.PermanentFailure("The photo and its camera data did not match. Please take it again."), upload())
+        assertEquals(UploadOutcome.PermanentFailure("The photo and its camera data did not match. Please take it again.", "FRAME_MISMATCH"), upload())
         respond(409, """{"error":"CONFLICT","message":"This capture id was already used for a different photo or report."}""")
         assertEquals(UploadOutcome.PermanentFailure("This capture id was already used for a different photo or report."), upload())
         respond(413, """{"error":"TOO_LARGE","message":"Request too large."}""")
         assertTrue(upload() is UploadOutcome.PermanentFailure)
         respond(422, """{"error":"SOMETHING_NEW","message":"Server says no."}""")
-        assertEquals(UploadOutcome.PermanentFailure("Server says no."), upload())
+        assertEquals(UploadOutcome.PermanentFailure("Server says no.", "SOMETHING_NEW"), upload())
+    }
+
+    @Test
+    fun `a description the server finds too long is named, so the reporter can correct it`() = runTest {
+        respond(422, """{"error":"DESCRIPTION_TOO_LONG","message":"The description is longer than 500 characters."}""")
+        assertEquals(
+            UploadOutcome.PermanentFailure(
+                "The description is longer than 500 characters. Edit it and send it again.", "DESCRIPTION_TOO_LONG"
+            ),
+            upload()
+        )
     }
 
     @Test

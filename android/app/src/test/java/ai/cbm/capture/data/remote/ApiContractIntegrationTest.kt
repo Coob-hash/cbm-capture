@@ -42,14 +42,11 @@ class ApiContractIntegrationTest {
     private fun api() = Retrofit.Builder().baseUrl(baseUrl.trimEnd('/') + "/").client(OkHttpClient())
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType())).build().create(AppApi::class.java)
 
-    /** A JPEG the API accepts: start marker, a baseline frame header of the given size, end marker.
-     *  (The API reads the frame header and the hash; it never decodes pixels. Android's unit-test
-     *  classpath has no image encoder.) */
-    private fun jpeg(width: Int, height: Int): ByteArray = byteArrayOf(
-        0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xC0.toByte(), 0x00, 0x11, 0x08,
-        (height shr 8).toByte(), height.toByte(), (width shr 8).toByte(), width.toByte(),
-        0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF.toByte(), 0xD9.toByte()
-    )
+    /** A real 960 x 1280 JPEG (a plain grey frame, 5 KB, in test resources). The API decodes what it
+     *  accepts - a frame header with no pixels behind it is refused - and Android's unit-test
+     *  classpath has no image encoder, so the image is a file rather than made here. */
+    private fun jpeg960x1280(): ByteArray =
+        checkNotNull(javaClass.getResourceAsStream("/contract-960x1280.jpg")) { "test resource missing" }.use { it.readBytes() }
 
     @Test
     fun `sign up, report a problem with a photo, see it listed, log out`() = runTest {
@@ -64,7 +61,7 @@ class ApiContractIntegrationTest {
         assertEquals("USER", session.memberships.single().role)
         assertEquals("ACTIVE", session.memberships.single().status)
 
-        val bytes = jpeg(960, 1280)
+        val bytes = jpeg960x1280()
         val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         val reportId = UUID.randomUUID().toString()
         val captureId = UUID.randomUUID().toString()

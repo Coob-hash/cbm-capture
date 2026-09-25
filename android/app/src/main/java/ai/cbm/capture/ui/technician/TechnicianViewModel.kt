@@ -84,12 +84,19 @@ class TechnicianViewModel @Inject constructor(
         }
     }
 
+    /** Open the trades picker on the trades already set (Q17: theirs to change, and only theirs). */
+    fun editSkills() = _state.update { it.copy(editingSkills = true, notice = null, error = null) }
+
+    fun cancelEditSkills() = _state.update { it.copy(editingSkills = false, error = null) }
+
     fun saveSkills(skills: List<String>) {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null) }
             when (val result = work.setSkills(skills)) {
                 is WorkResult.Ok -> {
-                    _state.update { it.copy(notice = "Saved. You will be offered jobs in these trades.") }
+                    _state.update {
+                        it.copy(editingSkills = false, notice = "Saved. You will be offered jobs in these trades.")
+                    }
                     refresh()
                 }
                 is WorkResult.Failed -> _state.update { it.copy(loading = false, error = result.message) }

@@ -122,6 +122,12 @@ class StillCameraController(private val intrinsics: Camera2IntrinsicsReader) {
         cameraId = null
     }
 
+    /** For good: the capture thread is stopped. The controller lives as long as the screen's model. */
+    fun close() {
+        unbind()
+        executor.shutdown()
+    }
+
     /**
      * Take the photograph for a tap at ([tapX], [tapY]) on a view of [viewWidth] x [viewHeight]
      * that shows the preview letterboxed.

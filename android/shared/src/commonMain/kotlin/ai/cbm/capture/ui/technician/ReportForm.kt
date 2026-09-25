@@ -1,5 +1,6 @@
 package ai.cbm.capture.ui.technician
 
+import ai.cbm.capture.domain.WorkDate
 import ai.cbm.capture.ui.design.AlertKind
 import ai.cbm.capture.ui.design.CapturePhoto
 import ai.cbm.capture.ui.design.CbmField
@@ -59,12 +60,18 @@ data class ReportFormState(
     val declaration: Boolean = false,
     val photoUri: String? = null,
     val photoCaption: String = "",
+    /** Why the photo could not be taken (no camera permission, no camera app), shown by the photo. */
+    val photoNotice: String? = null,
     val sending: Boolean = false,
     val sent: Boolean = false,
+    /** Why there is nothing to send: this round's report was sent already, or the job has gone. */
+    val closedNotice: String? = null,
     val error: String? = null
 ) {
+    val workDateValid: Boolean get() = WorkDate.isValid(workDate.trim())
+
     /** The same rules the server applies, so the button is only offered when the form is complete. */
-    val complete: Boolean get() = workDate.isNotBlank() && findings.isNotBlank() &&
+    val complete: Boolean get() = workDateValid && findings.isNotBlank() &&
         workPerformed.trim().length >= 20 && checks.isNotBlank() && checkResult != null &&
         outcome != null && remainingIssues.isNotBlank() && declaration &&
         (photoUri == null || photoCaption.isNotBlank())
@@ -118,7 +125,10 @@ fun ReportFormScreen(state: ReportFormState, actions: ReportFormActions) {
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            state.reworkReason?.let {
+            state.closedNotice?.let {
+                item { CbmInlineAlert(AlertKind.INFO, it, title = "Nothing to send") }
+            }
+            state.reworkReason?.takeIf { state.closedNotice == null }?.let {
                 item { CbmInlineAlert(AlertKind.WARN, "“$it”", title = "Sent back by the facility manager") }
             }
             item {
@@ -135,7 +145,19 @@ fun ReportFormScreen(state: ReportFormState, actions: ReportFormActions) {
                 }
             }
             item { SectionHeader("What you did") }
-            item { CbmField("Work date", state.workDate, actions.onWorkDate, placeholder = "2026-09-22", mono = true) }
+            item {
+                Column {
+                    CbmField("Work date", state.workDate, actions.onWorkDate, placeholder = "2026-09-22", mono = true)
+                    if (state.workDate.isNotBlank() && !state.workDateValid) {
+                        Text(
+                            "Write a real date as YYYY-MM-DD, for example 2026-09-22.",
+                            style = LocalTechStyles.current.meta,
+                            color = CbmPalette.Red,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+            }
             item {
                 CbmTextArea("What you found", state.findings, actions.onFindings, maxChars = 3000,
                     placeholder = "The seal was perished along the lower edge.")
@@ -194,12 +216,15 @@ fun ReportFormScreen(state: ReportFormState, actions: ReportFormActions) {
                 text = if (state.sending) "Sending…" else "Send the report",
                 onClick = actions.onSend,
                 modifier = Modifier.fillMaxWidth(),
-                enabled = state.complete && !state.sending && !state.sent,
+                enabled = state.complete && !state.sending && !state.sent && state.closedNotice == null,
                 tall = true
             )
             Text(
-                if (state.complete) "The facility manager reads it and either closes the job or sends it back."
-                else "Fill in the work, the checks, where it stands and the confirmation.",
+                when {
+                    state.closedNotice != null -> "There is no report to send for this job now."
+                    state.complete -> "The facility manager reads it and either closes the job or sends it back."
+                    else -> "Fill in the work, the checks, where it stands and the confirmation."
+                },
                 style = LocalTechStyles.current.meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -229,6 +254,10 @@ private fun PhotoRow(state: ReportFormState, actions: ReportFormActions) {
                     }
                 }
             }
+        }
+        state.photoNotice?.let {
+            Spacer(Modifier.height(10.dp))
+            CbmInlineAlert(AlertKind.WARN, it)
         }
         if (state.photoUri != null) {
             Spacer(Modifier.height(10.dp))

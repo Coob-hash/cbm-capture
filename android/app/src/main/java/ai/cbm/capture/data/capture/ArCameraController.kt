@@ -15,6 +15,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -97,8 +98,14 @@ class ArCameraController : GLSurfaceView.Renderer {
      */
     suspend fun capture(normalizedX: Float, normalizedY: Float): Result<ArSnapshot> {
         val deferred = CompletableDeferred<Result<ArSnapshot>>()
-        pendingCapture.set(PendingCapture(normalizedX, normalizedY, deferred))
-        return deferred.await()
+        val request = PendingCapture(normalizedX, normalizedY, deferred)
+        pendingCapture.set(request)
+        // A frame normally comes within one refresh. None within the limit - the session paused, or
+        // the camera went away - is a failed capture, not a screen that waits for ever.
+        return withTimeoutOrNull(CAPTURE_TIMEOUT_MS) { deferred.await() } ?: run {
+            pendingCapture.compareAndSet(request, null)
+            Result.failure(IllegalStateException("No camera frame arrived within $CAPTURE_TIMEOUT_MS ms."))
+        }
     }
 
     // ---- GLSurfaceView.Renderer ----
@@ -126,6 +133,8 @@ class ArCameraController : GLSurfaceView.Renderer {
             session.update()
         } catch (e: CameraNotAvailableException) {
             _trackingAdvice.value = "The camera is not available."
+            // A tap waiting for this frame will not get one: answer it now.
+            pendingCapture.getAndSet(null)?.result?.complete(Result.failure(e))
             return
         }
 
@@ -215,6 +224,8 @@ class ArCameraController : GLSurfaceView.Renderer {
     }
 
     companion object {
+        private const val CAPTURE_TIMEOUT_MS = 3_000L
+
         /** Focus and light estimation off: this app photographs surfaces, it does not light them. */
         fun configure(session: Session) {
             session.configure(

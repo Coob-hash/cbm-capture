@@ -7,6 +7,7 @@ import ai.cbm.capture.data.capture.StillCameraController
 import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.imaging.ImageTransform
 import ai.cbm.capture.domain.imaging.QuarterTurn
+import ai.cbm.capture.domain.model.CaptureContract
 import ai.cbm.capture.domain.model.IntrinsicsSource
 import ai.cbm.capture.domain.model.TrackingState
 import ai.cbm.capture.domain.repository.CaptureRepository
@@ -301,9 +302,10 @@ class CaptureViewModel @Inject constructor(
 
     // ---- Review actions ----
 
+    /** At most 500 characters: the server refuses more, and a refused photo cannot be edited in the queue. */
     fun updateDescription(text: String) {
         val reviewing = _phase.value as? Phase.Reviewing ?: return
-        _phase.value = reviewing.copy(description = text)
+        _phase.value = reviewing.copy(description = text.take(CaptureContract.DESCRIPTION_MAX_LENGTH))
     }
 
     fun discard() {
@@ -357,7 +359,7 @@ class CaptureViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        stillCamera.unbind()
+        stillCamera.close()
     }
 
     companion object {

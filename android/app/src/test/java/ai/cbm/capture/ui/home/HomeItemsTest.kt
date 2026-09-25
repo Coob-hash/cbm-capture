@@ -14,9 +14,13 @@ import java.time.ZoneOffset
 
 class HomeItemsTest {
 
-    private fun local(capture: String, report: String, status: OutboxStatus, error: String? = null) = ReportItem(
-        captureId = capture, reportId = report, createdAt = 0, summary = "Door handle", status = status, attemptCount = 0,
-        lastError = error, serverStatus = null, thumbnailPath = null, intrinsicsSource = IntrinsicsSource.ARCORE, intrinsicsTrusted = true)
+    private fun local(
+        capture: String, report: String, status: OutboxStatus, error: String? = null,
+        code: String? = null, description: String? = "Door handle"
+    ) = ReportItem(
+        captureId = capture, reportId = report, createdAt = 0, summary = description ?: "Untitled report", status = status,
+        attemptCount = 0, lastError = error, serverStatus = code, description = description, thumbnailPath = null,
+        intrinsicsSource = IntrinsicsSource.ARCORE, intrinsicsTrusted = true)
 
     private fun server(report: String, status: String, left: Int = 3, at: String = "2026-09-19T10:00:00+00:00") =
         ReportSummary(reportId = report, description = null, createdAt = at, attemptsLeft = left, status = status)
@@ -32,6 +36,20 @@ class HomeItemsTest {
         assertEquals("Saved on this phone — waiting to send", items[0].status)
         assertEquals("Report of 19 Sep 2026, 10:00", items[1].title)
         assertEquals(true, items[2].done)
+    }
+
+    @Test
+    fun `a photo refused for its text can have the text corrected, and only then`() {
+        // Audit 2026-09-24, finding 6: retry alone resends the same text forever.
+        val named = local("c1", "r1", OutboxStatus.REJECTED, "too long", code = "DESCRIPTION_TOO_LONG", description = "x".repeat(501))
+        val oldServer = local("c2", "r2", OutboxStatus.REJECTED, "The request is not valid.", code = null, description = "y".repeat(600))
+        val otherReason = local("c3", "r3", OutboxStatus.REJECTED, "did not match", code = "FRAME_MISMATCH")
+        val waiting = local("c4", "r4", OutboxStatus.QUEUED, description = "z".repeat(501))
+        val items = buildHomeItems(listOf(named, oldServer, otherReason, waiting), emptyList()).associateBy { it.key }
+        assertEquals("x".repeat(501), items.getValue("local-c1").editableDescription)
+        assertEquals("y".repeat(600), items.getValue("local-c2").editableDescription)
+        assertNull(items.getValue("local-c3").editableDescription)
+        assertNull(items.getValue("local-c4").editableDescription)
     }
 
     @Test

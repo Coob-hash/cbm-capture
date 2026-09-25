@@ -6,6 +6,7 @@ import ai.cbm.capture.data.remote.NETWORK_MESSAGE
 import ai.cbm.capture.data.remote.bearer
 import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.ReporterStatus
+import ai.cbm.capture.domain.model.CaptureContract
 import ai.cbm.capture.domain.model.ReportSummary
 import ai.cbm.capture.domain.repository.CaptureRepository
 import ai.cbm.capture.domain.repository.ReportItem
@@ -86,6 +87,11 @@ class ReporterHomeViewModel @Inject constructor(
     }
 
     fun retry(captureId: String) = viewModelScope.launch { repository.retry(captureId) }
+
+    /** Correct the text of a refused photo; [onQueued] runs once it is back in the queue. */
+    fun editDescription(captureId: String, text: String, onQueued: () -> Unit) = viewModelScope.launch {
+        if (repository.editDescription(captureId, text)) onQueued()
+    }
     fun discard(captureId: String) = viewModelScope.launch { repository.delete(captureId) }
 }
 
@@ -109,7 +115,8 @@ internal fun buildHomeItems(local: List<ReportItem>, server: List<ReportSummary>
                 OutboxStatus.DELIVERED -> "Sent"
             },
             detail = row.lastError,
-            rejectedCapture = row.captureId.takeIf { row.status == OutboxStatus.REJECTED }
+            rejectedCapture = row.captureId.takeIf { row.status == OutboxStatus.REJECTED },
+            editableDescription = (row.description ?: "").takeIf { row.status == OutboxStatus.REJECTED && refusedForItsText(row) }
         )
     }
     val reports = server.sortedByDescending { it.createdAt }.map { r ->
@@ -126,6 +133,15 @@ internal fun buildHomeItems(local: List<ReportItem>, server: List<ReportSummary>
     }
     return onPhone + reports
 }
+
+/**
+ * Refused because of its text: the server said so (DESCRIPTION_TOO_LONG), or - from a server that
+ * only answered "not valid" - the text is over the limit, which is the one thing wrong with it the
+ * reporter can put right without a new photo.
+ */
+private fun refusedForItsText(row: ReportItem): Boolean =
+    row.serverStatus == "DESCRIPTION_TOO_LONG" ||
+        (row.description?.length ?: 0) > CaptureContract.DESCRIPTION_MAX_LENGTH
 
 private fun formatDate(iso: String, zone: ZoneId): String =
     runCatching { OffsetDateTime.parse(iso).atZoneSameInstant(zone).format(DATE) }.getOrDefault(iso)

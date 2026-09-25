@@ -67,17 +67,31 @@ class SessionStore @Inject constructor(context: Context, private val json: Json)
 
     fun save(session: Session) {
         prefs.edit().putString(KEY_SESSION, json.encodeToString(Session.serializer(), session))
-            .putString(KEY_LAST_ACCOUNT, session.accountId).apply()
+            .putString(KEY_LAST_ACCOUNT, session.accountId)
+            .putString(KEY_LAST_EMAIL, session.email).apply()
         _session.value = session
     }
 
     fun clear() {
-        prefs.edit().remove(KEY_SESSION).apply()
+        val email = _session.value?.email
+        prefs.edit().remove(KEY_SESSION).apply {
+            // Also here, not only in save(): a session opened by an older version of the app never
+            // passed through a save() that records it, and it must still leave its email behind.
+            if (!email.isNullOrBlank()) putString(KEY_LAST_EMAIL, email)
+        }.apply()
         _session.value = null
     }
 
     /** Account of the most recent session, kept after log-out/expiry for its queued photos. */
     val lastAccountId: String? get() = prefs.getString(KEY_LAST_ACCOUNT, null)
+
+    /**
+     * Email of the most recent session, kept after log-out/expiry - and after the app is closed - so
+     * Log in can offer it. Same encrypted store as the session itself.
+     */
+    val lastEmail: String?
+        get() = prefs.getString(KEY_LAST_EMAIL, null)?.takeIf { it.isNotBlank() }
+            ?: _session.value?.email?.takeIf { it.isNotBlank() }
 
     /** A random id for this installation, created once. Not tied to any person. */
     val installId: String
@@ -97,6 +111,7 @@ class SessionStore @Inject constructor(context: Context, private val json: Json)
     private companion object {
         const val KEY_SESSION = "session"
         const val KEY_LAST_ACCOUNT = "last_account_id"
+        const val KEY_LAST_EMAIL = "last_email"
         const val KEY_INSTALL_ID = "install_id"
         const val KEY_SITE_CODE = "site_code"
     }

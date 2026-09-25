@@ -15,8 +15,8 @@ import javax.inject.Singleton
 /** Outcome of one upload attempt, in the categories the outbox acts on. */
 sealed interface UploadOutcome {
     data class Delivered(val status: String?) : UploadOutcome
-    /** The server will never accept this photo. Stop retrying and tell the reporter. */
-    data class PermanentFailure(val reason: String) : UploadOutcome
+    /** The server will never accept this photo as it is. Stop retrying and tell the reporter. */
+    data class PermanentFailure(val reason: String, val code: String? = null) : UploadOutcome
     /** Worth trying again later. */
     data class TransientFailure(val reason: String) : UploadOutcome
     /** The session ended. Keep the photo queued; it goes out after the same person logs in again. */
@@ -49,7 +49,7 @@ class CaptureUploader @Inject constructor(
                     401 -> UploadOutcome.NeedsLogin
                     409 -> UploadOutcome.PermanentFailure(r.apiError(json).message ?: "This photo was already sent differently.")
                     413 -> UploadOutcome.PermanentFailure("The photo is larger than the server accepts.")
-                    400, 422 -> r.apiError(json).let { UploadOutcome.PermanentFailure(rejection(it.error, it.message)) }
+                    400, 422 -> r.apiError(json).let { UploadOutcome.PermanentFailure(rejection(it.error, it.message), it.error) }
                     else -> UploadOutcome.TransientFailure("The server is unavailable (HTTP ${r.code()}).")
                 }
             } catch (e: IOException) {
@@ -63,6 +63,7 @@ class CaptureUploader @Inject constructor(
         "CHECKSUM_MISMATCH" -> "The photo was damaged on the way. Please take it again."
         "SITE_MISMATCH" -> "This photo belongs to another site than your account."
         "NOT_A_JPEG" -> "The photo could not be read. Please take it again."
+        "DESCRIPTION_TOO_LONG" -> "The description is longer than 500 characters. Edit it and send it again."
         else -> message ?: "The server did not accept this photo ($code)."
     }
 }

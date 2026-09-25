@@ -67,6 +67,8 @@ data class TechUiState(
     val completed: List<JobCard> = emptyList(),
     val loading: Boolean = true,
     val busyTicket: Int? = null,
+    /** The trades picker is open to change trades already set (the first time it opens by itself). */
+    val editingSkills: Boolean = false,
     val notice: String? = null,
     val error: String? = null
 ) {
@@ -85,11 +87,18 @@ fun TechnicianHomeScreen(
     onAnswerOffer: (JobCard, Boolean) -> Unit,
     onSaveSkills: (List<String>) -> Unit,
     onOpenReport: (JobCard) -> Unit,
-    onProfile: () -> Unit
+    onProfile: () -> Unit,
+    onEditSkills: () -> Unit = {},
+    onCancelEditSkills: () -> Unit = {}
 ) {
     // Q17: until the technician says what they work on, dispatch offers them nothing — so ask first.
     if (!state.loading && state.me.needsSkills) {
         SkillsScreen(state, onSave = onSaveSkills, onProfile = onProfile)
+        return
+    }
+    // Q17 again: the trades are theirs to change later, and only theirs.
+    if (state.editingSkills) {
+        SkillsScreen(state, onSave = onSaveSkills, onProfile = onProfile, onCancel = onCancelEditSkills)
         return
     }
     var tab by remember { mutableStateOf(0) }
@@ -106,7 +115,7 @@ fun TechnicianHomeScreen(
                 state.loading && state.offers.isEmpty() && state.current.isEmpty() -> CbmLoading("Reading your jobs")
                 tab == 1 -> OffersTab(state, onAnswerOffer)
                 tab == 2 -> ToReportTab(state, onOpenReport)
-                else -> WorkTab(state, onRefresh)
+                else -> WorkTab(state, onRefresh, onEditSkills)
             }
         }
         TechnicianTabs(
@@ -120,7 +129,7 @@ fun TechnicianHomeScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WorkTab(state: TechUiState, onRefresh: () -> Unit) {
+private fun WorkTab(state: TechUiState, onRefresh: () -> Unit, onEditSkills: () -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         state.error?.let { item { CbmInlineAlert(AlertKind.CRITICAL, it) } }
         state.notice?.let { item { CbmInlineAlert(AlertKind.INFO, it) } }
@@ -134,9 +143,10 @@ private fun WorkTab(state: TechUiState, onRefresh: () -> Unit) {
         item { SectionHeader("Your trades") }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                state.me.skills.forEach { CbmChip(skillLabel(it), selected = true, onClick = {}) }
+                state.me.skills.forEach { CbmChip(skillLabel(it), selected = true, onClick = onEditSkills) }
             }
         }
+        item { CbmOutlineButton("Change your trades", onEditSkills, Modifier.fillMaxWidth()) }
         item { SectionHeader("Done") }
         if (state.completed.isEmpty()) {
             item { CbmEmpty("No closed job yet", "A job appears here once the facility manager has approved your report.") }
@@ -247,7 +257,8 @@ private fun ToReportTab(state: TechUiState, onOpenReport: (JobCard) -> Unit) {
                 Text(job.title, style = MaterialTheme.typography.titleMedium)
                 Text(job.location.detail, style = LocalTechStyles.current.meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 job.work.slotLine?.let { MetaRow("Scheduled", it) }
-                job.work.reworkReason?.let {
+                // The reason stays on the ticket after the new report is sent; it is news only until then.
+                job.work.reworkReason?.takeIf { job.reportState == "REWORK" }?.let {
                     Spacer(Modifier.height(8.dp))
                     CbmInlineAlert(AlertKind.WARN, "“$it”", title = "The facility manager sent it back")
                 }
@@ -257,6 +268,12 @@ private fun ToReportTab(state: TechUiState, onOpenReport: (JobCard) -> Unit) {
                         if (job.reportState == "REWORK") "Fill the report again" else "Fill the report",
                         { onOpenReport(job) },
                         Modifier.fillMaxWidth()
+                    )
+                    // Sent: the office turns it into the report document, then it goes to the manager.
+                    "PROCESSING" -> Text(
+                        "Report sent. It reaches the facility manager in a few minutes.",
+                        style = LocalTechStyles.current.meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     "WITH_FM" -> Text(
                         "Report sent. Waiting for the facility manager.",
@@ -289,18 +306,25 @@ private fun JobRow(job: JobCard) {
     }
 }
 
-/** "What do you work on?" — the technician's own trades, nobody else's (Q17). */
+/**
+ * "What do you work on?" — the technician's own trades, nobody else's (Q17). Opens by itself at the
+ * first sign-in; later, [onCancel] is given and the same screen changes trades already set.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SkillsScreen(state: TechUiState, onSave: (List<String>) -> Unit, onProfile: () -> Unit) {
+fun SkillsScreen(state: TechUiState, onSave: (List<String>) -> Unit, onProfile: () -> Unit, onCancel: (() -> Unit)? = null) {
     var picked by remember(state.me.skills) { mutableStateOf(state.me.skills.toSet()) }
+    val firstTime = onCancel == null
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        CbmTopBar("First sign-in", state.siteCode, state.expiresAtMillis, 0, onProfile = onProfile)
+        CbmTopBar(if (firstTime) "First sign-in" else "Your trades", state.siteCode, state.expiresAtMillis, 0,
+            onProfile = onProfile, onBack = onCancel)
         Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("What do you work on?", style = MaterialTheme.typography.headlineMedium)
             Text(
-                "Jobs are offered to you only in the trades you pick. You can change this later in " +
-                    "your profile — nobody else can, not the facility manager.",
+                if (firstTime) "Jobs are offered to you only in the trades you pick. You can change them " +
+                    "later from My jobs — nobody else can, not the facility manager."
+                else "Jobs are offered to you only in the trades you pick. Nobody else can change them, " +
+                    "not the facility manager.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -322,12 +346,15 @@ fun SkillsScreen(state: TechUiState, onSave: (List<String>) -> Unit, onProfile: 
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             CbmPrimaryButton(
-                text = "Save and start",
+                text = if (firstTime) "Save and start" else "Save",
                 onClick = { onSave(state.catalog.filter { it in picked }) },
-                modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+                modifier = Modifier.fillMaxWidth().then(if (firstTime) Modifier.navigationBarsPadding() else Modifier),
                 enabled = picked.isNotEmpty() && !state.loading,
                 tall = true
             )
+            if (onCancel != null) {
+                CbmOutlineButton("Cancel", onCancel, Modifier.fillMaxWidth().navigationBarsPadding())
+            }
         }
     }
 }

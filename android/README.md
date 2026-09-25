@@ -55,6 +55,58 @@ about a minute, which is what the screen says.
   the template opens in the app, with the file chooser wired so the AFTER photo can be attached.
   The page still builds and posts the PDF itself, so nobody uploads a file anywhere.
 
+## Closed on 24 Sep (1.0.3, versionCode 4) — the second audit
+
+The second audit, of 1.0.2 (`output/cbm-audit-2026-09-24-second/CBM_SECOND_AUDIT.md`), found six
+defects; the app's share of them is fixed here (the server's share is in `backend/`):
+
+- **The report form survives Android reclaiming the app (1).** What the technician had written, the
+  attached photo and the file the camera app was writing into lived only in memory - the file in a
+  Compose `remember`. When Android reclaimed CBM while the camera was in front, the form came back
+  empty and the new photo was dropped. They now live in the form's `SavedStateHandle` as well
+  (`ui/technician/ReportDraft.kt`), and the camera's answer reaches the restored form.
+- **"Send photos over mobile data" reaches photos already waiting (2).** Switching it on only saved
+  the preference: the queued send kept the Wi-Fi-only constraint it had been queued with
+  (`ExistingWorkPolicy.KEEP`). The switch, and every return to the app, now updates a waiting send
+  in place to the network the preference allows (`UploadWorker.enqueueForPreference`, WorkManager's
+  `updateWork`). Nothing queued is dropped, and a send in progress is not interrupted.
+- **A sent report is no longer offered as "Fill the report" (3).** The ticket stays assigned until
+  the office takes the report, and the list used to go by the ticket alone. It now shows *Report
+  sent. It reaches the facility manager in a few minutes.* (`report_state = PROCESSING`, from the
+  server). A form opened before says there is nothing to send, and the server's refusal of a
+  second, different report (409) is shown, never a "sent" screen.
+
+Tests: 4 more (the draft's round trip, with and without its photo).
+
+## Closed on 24 Sep (1.0.2, versionCode 3) — the bug audit
+
+The audit of 1.0.1 (`output/cbm-audit-2026-09-24/CBM_BUG_AUDIT.md`) found eleven defects; the app's
+share of them, and two follow-ups, are fixed here (the server's share is in `backend/`):
+
+- **Take a photo no longer crashes the report form (2).** The app declares CAMERA, so the camera app
+  refused the picture request until the permission was granted - by throwing, which took the report
+  being written with it. The form now asks first, opens the camera on a yes, and on a no shows why
+  beside the photo button; the report is kept either way.
+- **Android 8 (3).** `LENS_DISTORTION` is read only on API 28+; on 26/27 the field does not exist and
+  the `NoSuchFieldError` escaped `catch (Exception)`. Lint: 0 errors.
+- **The description (6).** The review sheet stops at 500 characters and shows the count. A photo the
+  server refused for its text - including one queued by 1.0.1 - offers *Edit the description*:
+  only the description in the queued metadata changes (the photo, its hash and camera data stay),
+  and it goes back in the queue. Rejections now keep the server's code (`outbox.server_status`).
+- **Trades can be changed (7)**, from *Change your trades* (or a trade chip) on My jobs: the first
+  sign-in picker, reopened on the trades already set, with Cancel.
+- **The work date (9)** must be a real day (`domain/WorkDate.kt`, the server's rule); the field says
+  so, and Send waits for it.
+- **The last email (11)** survives the app being closed: `SessionStore` keeps it (also when clearing a
+  session opened by an older version), and Log in offers it; sign-up still starts empty.
+- A pending technician account (finding 1, server side) reads *Waiting for confirmation*.
+- Follow-ups: an AR capture that gets no frame (session paused, camera lost) fails after 3 s instead
+  of waiting for ever; the standard camera's capture thread is shut down with its screen.
+
+Tests: 50 (6 new: the work date, the AR capture that cannot hang, the description correction), plus
+the App ↔ API contract test, which now uploads a real JPEG (`src/test/resources/contract-960x1280.jpg`)
+because the API decodes what it accepts.
+
 ## Closed on 23 Sep (1.0.1, versionCode 2)
 
 Found by running the 21 Sep APK against the live deployment, fixed, and re-tested on an emulator.

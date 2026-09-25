@@ -8,6 +8,7 @@ import ai.cbm.capture.data.remote.CaptureUploader
 import ai.cbm.capture.data.remote.UploadOutcome
 import ai.cbm.capture.data.session.Session
 import ai.cbm.capture.data.settings.SettingsRepository
+import ai.cbm.capture.domain.model.CaptureContract
 import ai.cbm.capture.domain.model.CaptureMetadata
 import ai.cbm.capture.domain.model.IntrinsicsSource
 import android.content.Context
@@ -23,6 +24,9 @@ import javax.inject.Singleton
 import kotlin.math.min
 import kotlin.math.pow
 
+/** The title of a report sent without a description. */
+private const val UNTITLED = "Untitled report"
+
 /** A snapshot of one outbox row, shaped for the UI. */
 data class ReportItem(
     val captureId: String,
@@ -33,6 +37,8 @@ data class ReportItem(
     val attemptCount: Int,
     val lastError: String?,
     val serverStatus: String?,
+    /** The text as it will be sent (null when there is none). */
+    val description: String?,
     val thumbnailPath: String?,
     val intrinsicsSource: IntrinsicsSource,
     val intrinsicsTrusted: Boolean
@@ -82,7 +88,7 @@ class CaptureRepository @Inject constructor(
             reportId = pkg.metadata.reportId,
             createdAt = System.currentTimeMillis(),
             buildingId = pkg.metadata.buildingId,
-            summary = pkg.metadata.description?.takeIf { it.isNotBlank() } ?: "Untitled report",
+            summary = pkg.metadata.description?.takeIf { it.isNotBlank() } ?: UNTITLED,
             metadataJson = json.encodeToString(CaptureMetadata.serializer(), pkg.metadata),
             imagePath = imageFile.absolutePath,
             thumbnailPath = thumbnailFile?.absolutePath,
@@ -123,7 +129,7 @@ class CaptureRepository @Inject constructor(
                 }
 
                 is UploadOutcome.PermanentFailure ->
-                    dao.markRejected(claimed.captureId, outcome.reason)
+                    dao.markRejected(claimed.captureId, outcome.reason, outcome.code)
 
                 // The session ended while draining: back to the queue, sent after the next login.
                 UploadOutcome.NeedsLogin -> {
@@ -152,6 +158,23 @@ class CaptureRepository @Inject constructor(
         min(2.0.pow(min(attemptCount, 8)) * 5_000, 900_000.0).toLong()
 
     suspend fun retry(captureId: String) = dao.retryNow(captureId)
+
+    /**
+     * Correct the text of a refused photo and queue it again. Only the description changes: the
+     * photo, its hash and its camera data are exactly what was taken. The server refused the photo
+     * before recording anything, so the same capture id is sent again.
+     */
+    suspend fun editDescription(captureId: String, text: String): Boolean = withContext(Dispatchers.IO) {
+        val entity = dao.find(captureId) ?: return@withContext false
+        val clean = text.trim().takeIf { it.isNotEmpty() }
+        if ((clean?.length ?: 0) > CaptureContract.DESCRIPTION_MAX_LENGTH) return@withContext false
+        val metadata = json.decodeFromString(CaptureMetadata.serializer(), entity.metadataJson).copy(description = clean)
+        dao.replaceRejectedMetadata(
+            captureId,
+            json.encodeToString(CaptureMetadata.serializer(), metadata),
+            clean ?: UNTITLED
+        ) == 1
+    }
 
     suspend fun resetStuckUploads() = dao.resetStuckUploads()
 
@@ -189,6 +212,8 @@ class CaptureRepository @Inject constructor(
         attemptCount = entity.attemptCount,
         lastError = entity.lastError,
         serverStatus = entity.serverStatus,
+        description = runCatching { json.decodeFromString(CaptureMetadata.serializer(), entity.metadataJson).description }
+            .getOrNull(),
         thumbnailPath = entity.thumbnailPath,
         intrinsicsSource = runCatching { IntrinsicsSource.valueOf(entity.intrinsicsSource) }
             .getOrDefault(IntrinsicsSource.ARCORE),

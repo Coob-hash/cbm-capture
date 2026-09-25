@@ -24,7 +24,9 @@ class AuthViewModel @Inject constructor(
     private val store: SessionStore
 ) : ViewModel() {
 
-    private val _form = MutableStateFlow(AuthFormState(siteCode = store.siteCode))
+    // The last account's email survives the app being closed (SessionStore.lastEmail), so Log in
+    // offers it after a restart too - not only while this activity lives.
+    private val _form = MutableStateFlow(AuthFormState(siteCode = store.siteCode, email = store.lastEmail.orEmpty()))
     val form: StateFlow<AuthFormState> = _form.asStateFlow()
 
     fun onCode(value: String) = _form.update { it.copy(codeInput = value, error = null) }
@@ -42,7 +44,7 @@ class AuthViewModel @Inject constructor(
      * (it has one already), so sign-up must not start from it: typing a new address after it
      * produced "old@x.comnew@y.com".
      */
-    private var emailOfLastAccount = false
+    private var emailOfLastAccount = _form.value.email.isNotBlank()
 
     /** Called on the way to the sign-up screen. */
     fun startSignUp() {
@@ -77,7 +79,11 @@ class AuthViewModel @Inject constructor(
     fun logout(onDone: () -> Unit) {
         viewModelScope.launch {
             auth.logout()
-            _form.update { it.copy(password = "", busy = false, error = null) }
+            // The form may have been made while a session was open (the app started logged in):
+            // the account that just left is the one Log in offers.
+            _form.update {
+                it.copy(email = it.email.ifBlank { store.lastEmail.orEmpty() }, password = "", busy = false, error = null)
+            }
             emailOfLastAccount = _form.value.email.isNotBlank()
             onDone()
         }

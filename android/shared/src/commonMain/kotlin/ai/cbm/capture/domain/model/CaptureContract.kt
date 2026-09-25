@@ -14,6 +14,9 @@ import kotlinx.serialization.Serializable
  */
 object CaptureContract {
     const val SCHEMA_VERSION = "2.0.0"
+
+    /** The server refuses a longer description (cbm_app.reports.description); the app never sends one. */
+    const val DESCRIPTION_MAX_LENGTH = 500
 }
 
 @Serializable

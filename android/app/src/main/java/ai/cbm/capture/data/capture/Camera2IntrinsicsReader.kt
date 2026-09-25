@@ -6,6 +6,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.os.Build
 import android.util.Rational
 import android.util.Size
 
@@ -73,11 +74,21 @@ class Camera2IntrinsicsReader(private val context: Context) {
                 calibration[4].toDouble() * camera.fx / calibration[0]
             } else 0.0,
             lens = describeLens(characteristics),
-            // Only reported when the device advertises a distortion model. Carried, never applied.
-            distortion = characteristics.get(CameraCharacteristics.LENS_DISTORTION)
-                ?.map { it.toDouble() }
+            distortion = distortionOf(characteristics)
         )
     }
+
+    /**
+     * Only reported when the device advertises a distortion model. Carried, never applied.
+     * LENS_DISTORTION exists from Android 9 (API 28); on Android 8 the field itself is missing and
+     * touching it throws NoSuchFieldError, which no `catch (Exception)` sees - so it is not touched.
+     */
+    private fun distortionOf(characteristics: CameraCharacteristics): List<Double>? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            characteristics.get(CameraCharacteristics.LENS_DISTORTION)?.map { it.toDouble() }
+        } else {
+            null
+        }
 
     /** The sensor's active array, which every output stream of this camera is a crop of. */
     fun sensorArraySize(cameraId: String): Size? {

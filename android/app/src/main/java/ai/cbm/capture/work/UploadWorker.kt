@@ -13,6 +13,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.flow.first
 
 /**
  * Drains the outbox in the background.
@@ -47,30 +48,50 @@ class UploadWorker @AssistedInject constructor(
          * a saved report, a regained network, a foregrounded app - produce one drain, not three.
          */
         fun enqueue(context: Context, allowMetered: Boolean) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(if (allowMetered) NetworkType.CONNECTED else NetworkType.UNMETERED)
-                .build()
-
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_NAME,
                 ExistingWorkPolicy.KEEP,
                 OneTimeWorkRequestBuilder<UploadWorker>()
-                    .setConstraints(constraints)
+                    .setConstraints(constraintsFor(allowMetered))
                     .build()
             )
         }
 
+        /**
+         * Queue a drain on the network the upload preference allows now. [enqueue] keeps a drain
+         * already waiting, and with it the network it was queued for: after "Send photos over mobile
+         * data" was switched on, photos queued before stayed waiting for Wi-Fi. A waiting drain
+         * queued for the other network is updated in place instead - its photos are not touched,
+         * and a drain already running is not interrupted (the change applies to its next attempt).
+         */
+        suspend fun enqueueForPreference(context: Context, allowMetered: Boolean) {
+            val workManager = WorkManager.getInstance(context)
+            val waiting = workManager.getWorkInfosForUniqueWorkFlow(UNIQUE_NAME).first()
+                .firstOrNull { !it.state.isFinished }
+            if (waiting != null && waiting.constraints.requiredNetworkType != networkFor(allowMetered)) {
+                workManager.updateWork(
+                    OneTimeWorkRequestBuilder<UploadWorker>()
+                        .setId(waiting.id)
+                        .setConstraints(constraintsFor(allowMetered))
+                        .build()
+                )
+            }
+            enqueue(context, allowMetered)
+        }
+
+        private fun networkFor(allowMetered: Boolean) =
+            if (allowMetered) NetworkType.CONNECTED else NetworkType.UNMETERED
+
+        private fun constraintsFor(allowMetered: Boolean) =
+            Constraints.Builder().setRequiredNetworkType(networkFor(allowMetered)).build()
+
         /** Force an immediate attempt, replacing any pending one. Used by "Send all now". */
         fun enqueueNow(context: Context, allowMetered: Boolean) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(if (allowMetered) NetworkType.CONNECTED else NetworkType.UNMETERED)
-                .build()
-
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_NAME,
                 ExistingWorkPolicy.REPLACE,
                 OneTimeWorkRequestBuilder<UploadWorker>()
-                    .setConstraints(constraints)
+                    .setConstraints(constraintsFor(allowMetered))
                     .build()
             )
         }

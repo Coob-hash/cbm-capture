@@ -27,10 +27,14 @@ import ai.cbm.capture.ui.technician.TechnicianViewModel
 import ai.cbm.capture.ui.theme.CbmCaptureTheme
 import ai.cbm.capture.BuildConfig
 import ai.cbm.capture.work.UploadWorker
+import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,9 +45,7 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -152,7 +154,8 @@ class MainActivity : ComponentActivity() {
                             onDiscardUpload = vm::discard,
                             onRefresh = vm::refresh,
                             onSettings = { nav.navigate(Route.SETTINGS) },
-                            onLogout = { logout(nav) })
+                            onLogout = { logout(nav) },
+                            onEditDescription = { id, text -> vm.editDescription(id, text) { drainQueue() } })
                     }
                     composable(Route.TECHNICIAN) {
                         val vm: TechnicianViewModel = hiltViewModel()
@@ -163,8 +166,12 @@ class MainActivity : ComponentActivity() {
                             onAnswerOffer = vm::answerOffer,
                             onSaveSkills = vm::saveSkills,
                             onOpenReport = { job -> nav.navigate(Route.report(job.ticketId)) },
-                            onProfile = { nav.navigate(Route.SETTINGS) }
+                            onProfile = { nav.navigate(Route.SETTINGS) },
+                            onEditSkills = vm::editSkills,
+                            onCancelEditSkills = vm::cancelEditSkills
                         )
+                        // Back while changing trades closes the picker, not the app.
+                        BackHandler(enabled = state.editingSkills) { vm.cancelEditSkills() }
                     }
                     composable(Route.FM) {
                         val vm: FmViewModel = hiltViewModel()
@@ -188,13 +195,28 @@ class MainActivity : ComponentActivity() {
                     ) {
                         val vm: ReportFormViewModel = hiltViewModel()
                         val state by vm.state.collectAsStateWithLifecycle()
-                        // The camera writes into this app's cache and hands back that one picture.
-                        var pending by remember { mutableStateOf<Pair<File, Uri>?>(null) }
+                        // The camera writes into this app's cache and hands back that one picture. The
+                        // form's model keeps where, in saved state: Android may reclaim this app while the
+                        // camera app is in front, and then the answer arrives in a new activity.
                         val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-                            val taken = pending
-                            pending = null
-                            if (ok && taken != null) vm.onPhotoTaken(taken.first, taken.second.toString())
-                            else taken?.first?.delete()
+                            vm.onCameraResult(ok) { file -> photoUri(file).toString() }
+                        }
+                        // The app declares CAMERA, so Android refuses to hand the camera app a picture
+                        // request until the permission is granted - it throws, and the report being
+                        // written would be lost with the app. Ask first; open the camera on a yes.
+                        fun openCamera() {
+                            val file = newPhotoFile()
+                            vm.onCameraOpening(file)
+                            try {
+                                camera.launch(photoUri(file))
+                            } catch (e: ActivityNotFoundException) {
+                                vm.onCameraUnavailable(noCameraApp = true)
+                            } catch (e: SecurityException) {
+                                vm.onCameraUnavailable(noCameraApp = false)
+                            }
+                        }
+                        val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                            if (granted) openCamera() else vm.onCameraUnavailable(noCameraApp = false)
                         }
                         if (state.sent) {
                             ReportSentScreen(state.ticketId, state.siteCode, state.expiresAtMillis) {
@@ -210,10 +232,8 @@ class MainActivity : ComponentActivity() {
                                     onOutcome = vm::onOutcome, onRemainingIssues = vm::onRemainingIssues,
                                     onDeclaration = vm::onDeclaration,
                                     onTakePhoto = {
-                                        val file = newPhotoFile()
-                                        val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.photos", file)
-                                        pending = file to uri
-                                        camera.launch(uri)
+                                        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) openCamera()
+                                        else cameraPermission.launch(Manifest.permission.CAMERA)
                                     },
                                     onRemovePhoto = vm::onRemovePhoto, onCaption = vm::onCaption,
                                     onSend = vm::send, onBack = { nav.popBackStack() }
@@ -258,12 +278,18 @@ class MainActivity : ComponentActivity() {
         return File(dir, "after-${System.currentTimeMillis()}.jpg")
     }
 
+    /** The address the camera app writes the report's photo to, and the form shows it from. */
+    private fun photoUri(file: File): Uri = FileProvider.getUriForFile(this, "$packageName.photos", file)
+
     /** Where a capture id is served from: the App API, with this session's token (Coil adds it). */
     private fun photoUrl(captureId: String): String = BuildConfig.API_BASE_URL + "v1/photos/" + captureId
 
     private fun drainQueue() {
         if (sessions.current() == null) return
-        lifecycleScope.launch { UploadWorker.enqueue(this@MainActivity, settings.settings.first().uploadOnMetered) }
+        // For the preference as it is now: a drain queued before it changed is moved to its network.
+        lifecycleScope.launch {
+            UploadWorker.enqueueForPreference(this@MainActivity, settings.settings.first().uploadOnMetered)
+        }
     }
 
     private fun NavHostController.go(route: String) = navigate(route) { popUpTo(0) { inclusive = true }; launchSingleTop = true }
@@ -312,6 +338,10 @@ private fun waitingText(session: Session?): Pair<String, String> {
     return when {
         !m.isActive && m.role == "FM" -> "Waiting for approval" to
             "Your facility manager account for ${m.siteName} must be approved by an administrator. Tap Check again later."
+        // A technician waits only when the email already belongs to a technician on the site's list:
+        // the office confirms it is really them before their jobs appear here.
+        !m.isActive && m.role == "TECHNICIAN" -> "Waiting for confirmation" to
+            "The office must confirm your technician account for ${m.siteName} before your jobs appear. Tap Check again later."
         !m.isActive -> "Waiting for approval" to
             "Your $role account for ${m.siteName} must be approved by the facility manager. Tap Check again later."
         else -> "Nothing to do here" to "This account has no role with screens on ${m.siteName}."

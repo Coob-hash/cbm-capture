@@ -1,5 +1,6 @@
 package ai.cbm.capture.ui.review
 
+import ai.cbm.capture.domain.model.CaptureContract
 import ai.cbm.capture.ui.capture.CaptureViewModel
 import ai.cbm.capture.ui.common.GuidanceBanner
 import androidx.compose.foundation.Canvas
@@ -95,6 +96,10 @@ fun ReviewSheet(
                 onValueChange = onDescriptionChange,
                 label = { Text("What is wrong?") },
                 placeholder = { Text("For example: door handle detached, will not latch") },
+                // The server takes at most 500 characters; the field stops there, and says so.
+                supportingText = {
+                    Text("${state.description.length}/${CaptureContract.DESCRIPTION_MAX_LENGTH}")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2,
                 maxLines = 5

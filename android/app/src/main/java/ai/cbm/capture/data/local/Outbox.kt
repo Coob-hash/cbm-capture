@@ -110,8 +110,20 @@ interface OutboxDao {
     )
     suspend fun markDelivered(captureId: String, serverStatus: String?)
 
-    @Query("UPDATE outbox SET status = 'REJECTED', last_error = :reason WHERE capture_id = :captureId")
-    suspend fun markRejected(captureId: String, reason: String)
+    /** [code] is the server's reason (e.g. DESCRIPTION_TOO_LONG), kept to offer the right correction. */
+    @Query("UPDATE outbox SET status = 'REJECTED', last_error = :reason, server_status = :code WHERE capture_id = :captureId")
+    suspend fun markRejected(captureId: String, reason: String, code: String?)
+
+    /**
+     * A refused photo whose text was corrected: the new metadata replaces the old, and it goes back
+     * in the queue. Only a REJECTED row: one being sent or already sent is never rewritten.
+     */
+    @Query(
+        "UPDATE outbox SET metadata_json = :metadataJson, summary = :summary, status = 'QUEUED', " +
+            "next_attempt_at = 0, last_error = NULL, server_status = NULL " +
+            "WHERE capture_id = :captureId AND status = 'REJECTED'"
+    )
+    suspend fun replaceRejectedMetadata(captureId: String, metadataJson: String, summary: String): Int
 
     @Query(
         "UPDATE outbox SET status = 'QUEUED', last_error = :reason, next_attempt_at = :nextAttemptAt " +
