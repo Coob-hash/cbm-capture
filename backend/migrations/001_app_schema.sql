@@ -3,8 +3,9 @@
 --
 -- Accounts log in with email + password (bcrypt, pgcrypto) or Google. A login opens a session that
 -- lasts exactly one hour and is never extended. The role lives on a site membership: USER and
--- TECHNICIAN are active at sign-up (the app is open to anyone who has the site's code); only FM
--- waits for approval by the operator. reports / report_photos hold the reporter's
+-- TECHNICIAN are active at sign-up (the app is open to anyone who has the site's code); FM waits
+-- for approval by the operator, and so does a password sign-up that would take over an existing
+-- technician's dispatch row (see sign_up). reports / report_photos hold the reporter's
 -- photo + description; WF1 takes each capture into the workflows' intake (public.cbm_capture_begin).
 --
 -- Every function is SECURITY DEFINER with a fixed search_path: the API's login (002_api_role.sql)
@@ -45,6 +46,21 @@ CREATE TABLE IF NOT EXISTS cbm_app.password_credentials (
  password_hash text NOT NULL CHECK (password_hash LIKE '$2%'),
  changed_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+-- What the bcrypt hash was computed over. bcrypt reads only the first 72 bytes of its input, and a
+-- password may be up to 128 characters (more bytes still in UTF-8), so a password is hashed as
+-- bcrypt(base64(sha256(password))) - 44 characters that depend on every byte ('bcrypt-sha256').
+-- 'bcrypt' marks a hash of the raw password from before; login replaces it (see login).
+-- Repeatable: the column arrives with 'bcrypt' for the rows that exist, then new rows default to
+-- the new scheme.
+ALTER TABLE cbm_app.password_credentials ADD COLUMN IF NOT EXISTS scheme text NOT NULL DEFAULT 'bcrypt';
+ALTER TABLE cbm_app.password_credentials ALTER COLUMN scheme SET DEFAULT 'bcrypt-sha256';
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cbm_app.password_credentials'::regclass
+                AND conname='password_credentials_scheme') THEN
+  ALTER TABLE cbm_app.password_credentials ADD CONSTRAINT password_credentials_scheme
+   CHECK (scheme IN ('bcrypt','bcrypt-sha256'));
+ END IF;
+END $$;
 -- Google identities. The ID token is verified by the API; only its verified claims reach here.
 CREATE TABLE IF NOT EXISTS cbm_app.external_identities (
  provider text NOT NULL CHECK (provider IN ('GOOGLE')),
@@ -157,6 +173,29 @@ CREATE TABLE IF NOT EXISTS cbm_app.report_photos (
  CONSTRAINT report_photos_target_in_frame CHECK ((target_pixel->>'x')::float8 >= 0 AND (target_pixel->>'x')::float8 < image_width
     AND (target_pixel->>'y')::float8 >= 0 AND (target_pixel->>'y')::float8 < image_height)
 );
+-- The capture's geometry, complete and usable: the ray to the damage is cast from it. K with
+-- positive focal lengths and its principal point in the frame, K's frame the image's size, the tap
+-- inside the frame, and where K came from. A missing member or a JSON null makes it false, never
+-- unknown: a CHECK lets an unknown result through, which is how camera={} and a null tap passed the
+-- two checks above.
+CREATE OR REPLACE FUNCTION cbm_app.capture_geometry_valid(p_camera jsonb, p_pixel jsonb, p_width integer, p_height integer)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path = cbm_app, public, pg_temp AS $$
+BEGIN
+ IF jsonb_typeof(p_camera) IS DISTINCT FROM 'object' OR jsonb_typeof(p_pixel) IS DISTINCT FROM 'object'
+  OR p_width IS NULL OR p_height IS NULL THEN RETURN false; END IF;
+ IF EXISTS (SELECT 1 FROM unnest(ARRAY[p_camera->'fx', p_camera->'fy', p_camera->'cx', p_camera->'cy',
+     p_camera->'width', p_camera->'height', p_pixel->'x', p_pixel->'y']) v
+    WHERE jsonb_typeof(v) IS DISTINCT FROM 'number') THEN RETURN false; END IF;
+ -- numeric, not float8: a JSON number of any size compares without overflowing.
+ RETURN (p_camera->>'fx')::numeric > 0 AND (p_camera->>'fy')::numeric > 0
+  AND (p_camera->>'cx')::numeric BETWEEN 0 AND p_width AND (p_camera->>'cy')::numeric BETWEEN 0 AND p_height
+  AND (p_camera->>'width')::numeric = p_width AND (p_camera->>'height')::numeric = p_height
+  AND (p_pixel->>'x')::numeric >= 0 AND (p_pixel->>'x')::numeric < p_width
+  AND (p_pixel->>'y')::numeric >= 0 AND (p_pixel->>'y')::numeric < p_height
+  AND coalesce(p_camera->>'source' IN ('ARKIT','ARCORE','ANDROID_CAMERA2','EXIF','MANUAL_OVERRIDE'), false)
+  AND jsonb_typeof(p_camera->'trusted') IS NOT DISTINCT FROM 'boolean';
+END $$;
+
 -- Repeatable upgrade of the photo lifecycle (also brings a table created by an earlier version of
 -- this file up to date): replace the status checks with the named ones below.
 ALTER TABLE cbm_app.report_photos ADD COLUMN IF NOT EXISTS image_bytes integer;
@@ -164,7 +203,8 @@ ALTER TABLE cbm_app.report_photos ADD COLUMN IF NOT EXISTS stored_at timestamptz
 ALTER TABLE cbm_app.report_photos ADD COLUMN IF NOT EXISTS intake_checked_at timestamptz;
 DO $$ DECLARE c record; BEGIN
  FOR c IN SELECT conname FROM pg_constraint WHERE conrelid='cbm_app.report_photos'::regclass AND contype='c'
-  AND conname NOT IN ('report_photos_frame_size','report_photos_target_in_frame','report_photos_status','report_photos_stage')
+  AND conname NOT IN ('report_photos_frame_size','report_photos_target_in_frame','report_photos_status','report_photos_stage',
+                      'report_photos_geometry')
   AND pg_get_constraintdef(oid) ~ '(status|storage_ref)'
  LOOP EXECUTE format('ALTER TABLE cbm_app.report_photos DROP CONSTRAINT %I', c.conname); END LOOP;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cbm_app.report_photos'::regclass AND conname='report_photos_status') THEN
@@ -176,6 +216,10 @@ DO $$ DECLARE c record; BEGIN
    (status = 'RECEIVED') = (storage_ref IS NULL) AND (status = 'RECEIVED') = (stored_at IS NULL)
    AND (storage_ref IS NULL OR storage_ref = 'app-' || capture_id::text));
  END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cbm_app.report_photos'::regclass AND conname='report_photos_geometry') THEN
+  ALTER TABLE cbm_app.report_photos ADD CONSTRAINT report_photos_geometry
+   CHECK (cbm_app.capture_geometry_valid(camera_intrinsics, target_pixel, image_width, image_height));
+ END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS report_photos_by_report ON cbm_app.report_photos(report_id, received_at);
 CREATE INDEX IF NOT EXISTS report_photos_awaiting_intake ON cbm_app.report_photos(stored_at) WHERE status IN ('STORED','PAUSED');
@@ -184,6 +228,12 @@ CREATE INDEX IF NOT EXISTS report_photos_awaiting_intake ON cbm_app.report_photo
 CREATE OR REPLACE FUNCTION cbm_app.token_hash(p_token text) RETURNS text
 LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
  SELECT CASE WHEN p_token ~ '^[0-9a-f]{64}$' THEN encode(sha256(convert_to(p_token,'UTF8')),'hex') END
+$$;
+
+-- The input bcrypt sees for a password ('bcrypt-sha256', see password_credentials.scheme).
+CREATE OR REPLACE FUNCTION cbm_app.password_input(p_password text) RETURNS text
+LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
+ SELECT encode(sha256(convert_to(coalesce(p_password,''),'UTF8')),'base64')
 $$;
 
 CREATE OR REPLACE FUNCTION cbm_app.register_device(p jsonb) RETURNS uuid
@@ -261,7 +311,8 @@ BEGIN
  INSERT INTO users(email,display_name)
  VALUES (v_email,left(nullif(btrim(coalesce(p->>'display_name',g->>'name')),''),150)) RETURNING id INTO uid;
  IF v_method='PASSWORD' THEN
-  INSERT INTO password_credentials(user_id,password_hash) VALUES (uid,crypt(p->>'password',gen_salt('bf',12)));
+  INSERT INTO password_credentials(user_id,password_hash,scheme)
+  VALUES (uid,crypt(password_input(p->>'password'),gen_salt('bf',12)),'bcrypt-sha256');
  ELSE
   INSERT INTO external_identities(provider,subject,user_id,email) VALUES ('GOOGLE',g->>'subject',uid,v_email);
  END IF;
@@ -269,16 +320,21 @@ BEGIN
  -- request until the operator approves it.
  v_status := CASE WHEN v_role='FM' THEN 'PENDING' ELSE 'ACTIVE' END;
  IF v_role='TECHNICIAN' THEN
-  -- The workflows dispatch to public.technicians. Link the row with this email if there is one and
-  -- no account drives it yet (it keeps its skills); otherwise create one with no skills, which
-  -- dispatch never selects until skills are set.
-  SELECT t.id INTO tid FROM public.technicians t WHERE lower(t.email)=v_email
-   AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.technician_id=t.id AND m.status='ACTIVE')
-  ORDER BY t.id LIMIT 1;
+  -- The workflows dispatch to public.technicians. A new technician gets a new row with no skills,
+  -- which dispatch never selects until skills are set. An address that already names a technician
+  -- is different: nothing here proves the person signing up owns that mailbox, and the row carries
+  -- someone's assigned jobs and history. So a password sign-up for it waits for the operator, who
+  -- links it after checking (decide_membership). A Google address is verified by Google, so it
+  -- links at once, as long as no other account drives the row.
+  SELECT t.id INTO tid FROM public.technicians t WHERE lower(t.email)=v_email ORDER BY t.id LIMIT 1;
   IF tid IS NULL THEN
    INSERT INTO public.technicians(full_name,email,skills)
    VALUES (coalesce(left(nullif(btrim(coalesce(p->>'display_name',g->>'name')),''),150),v_email),v_email,'{}')
    RETURNING id INTO tid;
+  ELSIF v_method <> 'GOOGLE'
+   OR EXISTS (SELECT 1 FROM memberships m WHERE m.technician_id=tid AND m.status='ACTIVE') THEN
+   v_status := 'PENDING';
+   tid := NULL;
   END IF;
  END IF;
  INSERT INTO memberships(user_id,site_id,role,status,decided_at,technician_id)
@@ -291,7 +347,8 @@ END $$;
 -- indistinguishable, in answer and in time (a bcrypt is computed either way).
 CREATE OR REPLACE FUNCTION cbm_app.login(p jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = cbm_app, public, pg_temp AS $$
-DECLARE g jsonb := p->'google'; u users; h text; did uuid; v_email text; v_method text;
+DECLARE g jsonb := p->'google'; u users; h text; v_scheme text; did uuid; v_email text; v_method text;
+ v_password text := coalesce(p->>'password','');
 BEGIN
  did := register_device(p->'device');
  IF did IS NULL THEN RETURN jsonb_build_object('status','INVALID_DEVICE'); END IF;
@@ -318,9 +375,9 @@ BEGIN
    INSERT INTO login_events(user_id,email,device_id,method,outcome) VALUES (u.id,u.email,did,v_method,'LOCKED');
    RETURN jsonb_build_object('status','LOCKED','locked_until',u.locked_until);
   END IF;
-  SELECT password_hash INTO h FROM password_credentials WHERE user_id=u.id;
-  IF h IS NULL THEN PERFORM crypt(coalesce(p->>'password',''),gen_salt('bf',12)); END IF;
-  IF h IS NULL OR crypt(coalesce(p->>'password',''),h) <> h THEN
+  SELECT password_hash, scheme INTO h, v_scheme FROM password_credentials WHERE user_id=u.id;
+  IF h IS NULL THEN PERFORM crypt(password_input(v_password),gen_salt('bf',12)); END IF;
+  IF h IS NULL OR crypt(CASE WHEN v_scheme='bcrypt-sha256' THEN password_input(v_password) ELSE v_password END,h) <> h THEN
    IF u.id IS NOT NULL THEN
     UPDATE users SET failed_logins = CASE WHEN failed_logins+1 >= 5 THEN 0 ELSE failed_logins+1 END,
      locked_until = CASE WHEN failed_logins+1 >= 5 THEN clock_timestamp()+interval '15 minutes' ELSE locked_until END
@@ -329,6 +386,15 @@ BEGIN
    INSERT INTO login_events(user_id,email,device_id,method,outcome)
    VALUES (u.id,left(v_email,254),did,v_method,'INVALID_CREDENTIALS');
    RETURN jsonb_build_object('status','INVALID_CREDENTIALS');
+  END IF;
+  -- A hash of the raw password (from before 'bcrypt-sha256') is replaced now that the password is
+  -- in hand. Only when the password fits in bcrypt's 72 bytes: then the old check saw all of it,
+  -- and the new hash binds exactly what the account always had. A longer one keeps working as it
+  -- did until the password is changed.
+  IF v_scheme <> 'bcrypt-sha256' AND octet_length(v_password) <= 72 THEN
+   UPDATE password_credentials SET password_hash=crypt(password_input(v_password),gen_salt('bf',12)),
+    scheme='bcrypt-sha256', changed_at=clock_timestamp()
+   WHERE user_id=u.id;
   END IF;
  END IF;
  IF u.status <> 'ACTIVE' THEN
@@ -444,6 +510,8 @@ BEGIN
    RETURNING id INTO tid;
   ELSIF NOT EXISTS (SELECT 1 FROM public.technicians WHERE id=tid) THEN
    RETURN jsonb_build_object('status','TECHNICIAN_NOT_FOUND');
+  ELSIF EXISTS (SELECT 1 FROM memberships WHERE technician_id=tid AND status='ACTIVE' AND id<>m.id) THEN
+   RETURN jsonb_build_object('status','TECHNICIAN_ALREADY_LINKED','technician_id',tid);
   END IF;
  END IF;
  UPDATE memberships SET status='ACTIVE',decided_at=clock_timestamp(),decided_by=decider,
@@ -465,7 +533,8 @@ BEGIN
   OR coalesce(p->>'report_id','') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
   RETURN jsonb_build_object('status','INVALID','reason','IDS'); END IF;
  IF p->>'building_id' IS DISTINCT FROM a->>'site_id' THEN RETURN jsonb_build_object('status','SITE_MISMATCH'); END IF;
- IF length(v_text) > 500 THEN RETURN jsonb_build_object('status','INVALID','reason','DESCRIPTION_TOO_LONG'); END IF;
+ -- Named, so the app can say which field to correct rather than "the request is not valid".
+ IF length(v_text) > 500 THEN RETURN jsonb_build_object('status','DESCRIPTION_TOO_LONG'); END IF;
  cid := (p->>'capture_id')::uuid; rid := (p->>'report_id')::uuid;
  PERFORM pg_advisory_xact_lock(hashtextextended('cbm-app-report:'||rid,0));
  SELECT * INTO ph FROM report_photos WHERE capture_id=cid;

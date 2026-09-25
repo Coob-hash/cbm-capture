@@ -31,7 +31,7 @@ DO $$ DECLARE r jsonb; BEGIN
  ASSERT r->>'status'='OK' AND r->>'token' ~ '^[0-9a-f]{64}$', 'sign-up returns a session: '||r;
  ASSERT r->>'membership_id' IS NOT NULL AND r#>>'{memberships,0,status}'='ACTIVE', 'USER membership active and bound';
  ASSERT (SELECT email FROM cbm_app.users WHERE id=(r#>>'{user,id}')::uuid)='reporter@example.com', 'email stored lower-case';
- ASSERT (SELECT password_hash FROM cbm_app.password_credentials WHERE user_id=(r#>>'{user,id}')::uuid) LIKE '$2%', 'bcrypt hash stored';
+ ASSERT (SELECT password_hash LIKE '$2%' AND scheme='bcrypt-sha256' FROM cbm_app.password_credentials WHERE user_id=(r#>>'{user,id}')::uuid), 'bcrypt hash stored, over the whole password';
  ASSERT (r->>'expires_at')::timestamptz BETWEEN clock_timestamp()+interval '59 minutes' AND clock_timestamp()+interval '61 minutes', 'one-hour session';
  PERFORM pg_temp.put('reporter',r->>'token');
  ASSERT cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','email','reporter@example.com','password','long-enough-1','device',pg_temp.dev(1)))->>'status'='ACCOUNT_EXISTS', 'duplicate email';
@@ -75,19 +75,53 @@ DO $$ DECLARE r jsonb; i int; BEGIN
  ASSERT cbm_app.authenticate(pg_temp.get('reporter'),ARRAY['USER']) IS NOT NULL, 'other sessions unaffected';
 END $$;
 
--- 5. USER and TECHNICIAN are open roles; only FM waits for the operator --------------------------------
+-- 4b. Every character of a password counts; a hash from before is replaced at login -----------------
+DO $$ DECLARE r jsonb; uid uuid; head text := repeat('x',72); BEGIN
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','USER','email','long@example.com','password',head||'A','device',pg_temp.dev(9)));
+ uid := (r#>>'{user,id}')::uuid;
+ ASSERT (SELECT scheme='bcrypt-sha256' FROM cbm_app.password_credentials WHERE user_id=uid), 'new hashes take the whole password';
+ ASSERT cbm_app.login(jsonb_build_object('email','long@example.com','password',head||'B','device',pg_temp.dev(9)))->>'status'='INVALID_CREDENTIALS',
+  'bcrypt reads 72 bytes, but a difference after them still counts';
+ ASSERT cbm_app.login(jsonb_build_object('email','long@example.com','password',head||'A','device',pg_temp.dev(9)))->>'status'='OK', 'the right long password';
+ -- An account hashed the old way, over the raw password.
+ UPDATE cbm_app.password_credentials SET password_hash=crypt('legacy-pass-1',gen_salt('bf',4)), scheme='bcrypt' WHERE user_id=uid;
+ ASSERT cbm_app.login(jsonb_build_object('email','long@example.com','password','legacy-pass-1','device',pg_temp.dev(9)))->>'status'='OK', 'an old hash still logs in';
+ ASSERT (SELECT scheme='bcrypt-sha256' AND crypt(cbm_app.password_input('legacy-pass-1'),password_hash)=password_hash
+         FROM cbm_app.password_credentials WHERE user_id=uid), 'and is replaced by one over the whole password';
+ ASSERT cbm_app.login(jsonb_build_object('email','long@example.com','password','legacy-pass-1','device',pg_temp.dev(9)))->>'status'='OK', 'which logs in';
+ UPDATE cbm_app.users SET failed_logins=0 WHERE id=uid;
+END $$;
+
+-- 5. USER and TECHNICIAN are open roles; FM waits for the operator, and so does taking over an ---------
+--    existing technician's row
 INSERT INTO public.technicians(full_name,email,skills) VALUES ('Existing Tech','Existing.Tech@example.com','{doors,locks}');
-DO $$ DECLARE r jsonb; fm jsonb; tech jsonb; tid int; BEGIN
+INSERT INTO public.technicians(full_name,email,skills) VALUES ('Google Tech','google.tech@example.com','{hvac}');
+DO $$ DECLARE r jsonb; d jsonb; fm jsonb; tech jsonb; tid int; BEGIN
  tech := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','TECHNICIAN','email','tech@example.com','password','long-enough-1','display_name','Tina Tech','device',pg_temp.dev(4)));
  ASSERT tech#>>'{memberships,0,status}'='ACTIVE', 'technician is active at sign-up: '||tech;
  tid := (tech#>>'{memberships,0,technician_id}')::int;
  ASSERT (cbm_app.authenticate(tech->>'token',ARRAY['TECHNICIAN'])->>'technician_id')::int=tid, 'technician gate carries technician_id';
  ASSERT (SELECT full_name='Tina Tech' AND email='tech@example.com' AND skills='{}' AND active FROM public.technicians WHERE id=tid),
   'a new technician row with no skills (dispatch never selects it until skills are set)';
+ -- Knowing a technician's address is not being that technician: a password sign-up proves nothing
+ -- about the mailbox, so it cannot take over the row, its jobs or its history until the operator
+ -- has checked and linked it.
  r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','TECHNICIAN','email','existing.tech@example.com','password','long-enough-1','device',pg_temp.dev(8)));
- tid := (r#>>'{memberships,0,technician_id}')::int;
- ASSERT (SELECT email='Existing.Tech@example.com' AND skills='{doors,locks}' FROM public.technicians WHERE id=tid), 'existing technician linked by email, skills kept';
+ ASSERT r#>>'{memberships,0,status}'='PENDING' AND r#>>'{memberships,0,technician_id}' IS NULL,
+  'a password sign-up for an existing technician waits, unlinked: '||r;
+ ASSERT cbm_app.authenticate(r->>'token',ARRAY['TECHNICIAN']) IS NULL, 'and reaches nothing meanwhile';
  ASSERT (SELECT count(*) FROM public.technicians WHERE lower(email)='existing.tech@example.com')=1, 'no duplicate technician row';
+ ASSERT cbm_app.decide_membership(jsonb_build_object('membership_id',r->>'membership_id','decision','APPROVE','decider_token',tech->>'token'))->>'status'='FORBIDDEN', 'a technician cannot approve one';
+ d := cbm_app.decide_membership(jsonb_build_object('membership_id',r->>'membership_id','decision','APPROVE','operator',true));
+ tid := (d->>'technician_id')::int;
+ ASSERT d->>'status'='APPROVED' AND (SELECT email='Existing.Tech@example.com' AND skills='{doors,locks}' FROM public.technicians WHERE id=tid),
+  'the operator links the existing row, skills kept: '||d;
+ ASSERT (cbm_app.authenticate(r->>'token',ARRAY['TECHNICIAN'])->>'technician_id')::int=tid, 'linked in the open session';
+ -- A Google address is verified by Google: that sign-up links at once.
+ r := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','TECHNICIAN','device',pg_temp.dev(10),
+   'google',jsonb_build_object('subject','g-tech','email','Google.Tech@example.com','email_verified',true)));
+ ASSERT r#>>'{memberships,0,status}'='ACTIVE' AND (r#>>'{memberships,0,technician_id}')::int=(SELECT id FROM public.technicians WHERE email='google.tech@example.com'),
+  'a verified Google address links its technician row: '||r;
  fm := cbm_app.sign_up(jsonb_build_object('site_code','site-code-001','role','FM','email','fm@example.com','password','long-enough-1','device',pg_temp.dev(3)));
  ASSERT fm#>>'{memberships,0,status}'='PENDING', 'FM is a request';
  ASSERT cbm_app.authenticate(fm->>'token',ARRAY['FM']) IS NULL, 'a pending FM grants nothing';
@@ -136,7 +170,7 @@ CREATE OR REPLACE FUNCTION pg_temp.wf1_claim(item jsonb, ready boolean DEFAULT t
    'reporter_email',item->>'reporter_email','photo_url',item->>'webViewLink','execution_id','test',
    'registration_ready',ready,'configuration_reason',CASE WHEN ready THEN NULL ELSE 'REGISTRATION_REQUIRED' END))))
 $f$;
-DO $$ DECLARE r jsonb; item jsonb; c1 text:='11111111-1111-4111-8111-111111111111'; c2 text:='22222222-2222-4222-8222-222222222222';
+DO $$ DECLARE r jsonb; item jsonb; bad jsonb; c1 text:='11111111-1111-4111-8111-111111111111'; c2 text:='22222222-2222-4222-8222-222222222222';
  c3 text:='44444444-4444-4444-8444-444444444444'; rep text:='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
  rep2 text:='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; tok text:=pg_temp.get('reporter'); BEGIN
  ASSERT cbm_app.claim_capture(pg_temp.get('tech'),pg_temp.capture(c1,rep,960,1280,500))->>'status'='UNAUTHENTICATED', 'technician cannot report';
@@ -145,6 +179,27 @@ DO $$ DECLARE r jsonb; item jsonb; c1 text:='11111111-1111-4111-8111-11111111111
   PERFORM cbm_app.claim_capture(tok,pg_temp.capture(c1,rep,960,1280,5000));
   RAISE EXCEPTION 'out-of-frame target was accepted';
  EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
+ -- The geometry must be complete and usable: a missing member or a JSON null left the two frame
+ -- checks unknown, which a CHECK lets through, and nothing checked the focal lengths.
+ FOR bad IN SELECT x FROM unnest(ARRAY[
+   pg_temp.capture(c1,rep,960,1280,500)||'{"camera":{}}',
+   pg_temp.capture(c1,rep,960,1280,500)||'{"camera":null}',
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{target,pixel}','{}'),
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{target,pixel}','null'),
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{camera,fx}','0'),
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{camera,fy}','"950"'),
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{camera,cx}','961'),
+   jsonb_set(pg_temp.capture(c1,rep,960,1280,500),'{camera,trusted}','"yes"'),
+   pg_temp.capture(c1,rep,960,1280,500) #- '{camera,source}']) x LOOP
+  BEGIN
+   PERFORM cbm_app.claim_capture(tok,bad);
+   RAISE EXCEPTION 'unusable geometry was accepted: %', bad;
+  EXCEPTION WHEN invalid_parameter_value THEN NULL; END;
+ END LOOP;
+ ASSERT cbm_app.capture_geometry_valid('{"source":"EXIF","trusted":false,"fx":1e40,"fy":1e40,"cx":480,"cy":640,"width":960,"height":1280}',
+   '{"x":0,"y":1279.5}',960,1280), 'an implausible but positive K is kept, for the trusted flag to route';
+ ASSERT NOT cbm_app.capture_geometry_valid(NULL,NULL,960,1280) AND NOT cbm_app.capture_geometry_valid('[]','{}',960,1280),
+  'no geometry is not valid geometry';
  ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.reports WHERE id=rep::uuid), 'rejected capture leaves no report behind';
  r := cbm_app.claim_capture(tok,pg_temp.capture(c1,rep,960,1280,500));
  ASSERT r->>'status'='UPLOAD' AND r->>'reporter_email'='reporter@example.com', 'claim: '||r;
@@ -404,6 +459,12 @@ DO $$ DECLARE r jsonb; tid int:=pg_temp.get('ticket')::int; tech int:=pg_temp.ge
    'report',pg_temp.report_fields()||'{"declaration":false}'))->>'status'='INVALID_REPORT', 'the declaration is required';
  ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
    'report',pg_temp.report_fields()||'{"check_result":"MAYBE"}'))->>'status'='INVALID_REPORT', 'the check result is one of three';
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"work_date":"2026-99-99"}'))->>'status'='INVALID_REPORT', 'the work date is a day that exists';
+ ASSERT cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"work_date":"2026-02-29"}'))->>'status'='INVALID_REPORT', '2026 is not a leap year';
+ ASSERT cbm_app.is_calendar_date('2028-02-29') AND NOT cbm_app.is_calendar_date('2026-9-22')
+   AND NOT cbm_app.is_calendar_date('0000-01-01') AND NOT cbm_app.is_calendar_date(NULL), 'calendar dates, written YYYY-MM-DD';
  ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.technician_reports), 'nothing was written by a refused report';
 
  -- With a photo the API is told to upload it; the report is not visible to WF2 until it has.
@@ -423,20 +484,33 @@ DO $$ DECLARE r jsonb; tid int:=pg_temp.get('ticket')::int; tech int:=pg_temp.ge
  ASSERT (SELECT report->>'reported_issue' FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid)='Door handle detached',
   'the reported issue comes from the ticket';
 
- -- Repeating the same submission answers with the same report instead of writing a second one.
+ -- The photo never arrived (the upload was interrupted) and the technician sends again, maybe with
+ -- another photo: the retry replaces the waiting report whole - same report, not a second one - so
+ -- the bytes stored next are the ones the row describes.
  r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
    'report',pg_temp.report_fields(),
-   'photo',jsonb_build_object('caption','again','sha256',repeat('d',64),'bytes',120000)));
- ASSERT r->>'report_id'=pg_temp.get('report'), 'the same report comes back';
+   'photo',jsonb_build_object('caption','The new seal in place','sha256',repeat('f',64),'bytes',98000)));
+ ASSERT r->>'status'='UPLOAD' AND r->>'report_id'=pg_temp.get('report'), 'the same report comes back, to upload: '||r;
  ASSERT (SELECT count(*) FROM cbm_app.technician_reports)=1, 'one report, not two';
+ ASSERT (SELECT photo_sha256=repeat('f',64) AND photo_bytes=98000 FROM cbm_app.technician_reports WHERE id=(r->>'report_id')::uuid),
+  'the photo it waits for is the retry''s';
 END $$;
 
 DO $$ DECLARE r jsonb; item jsonb; rid uuid:=pg_temp.get('report')::uuid; tid int:=pg_temp.get('ticket')::int; BEGIN
+ -- Stored only over the photo it describes.
+ r := cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid,'photo_sha256',repeat('d',64)));
+ ASSERT r->>'status'='CONFLICT', 'bytes with another hash do not complete the report: '||r;
+ ASSERT (SELECT status FROM cbm_app.technician_reports WHERE id=rid)='RECEIVED', 'still waiting for its photo';
  -- Once the photo is on disk the report is WF2's to take.
- r := cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid));
+ r := cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid,'photo_sha256',repeat('f',64)));
  ASSERT r->>'status'='STORED' AND (r->>'ticket_id')::int=tid, 'stored: '||r;
  ASSERT (SELECT storage_ref FROM cbm_app.technician_reports WHERE id=rid)='report-'||rid::text||'.jpg', 'the photo has a place in the store';
  ASSERT cbm_app.store_technician_report(pg_temp.get('tech'),jsonb_build_object('report_id',rid))->>'status'='STORED', 'storing twice is harmless';
+ -- Sending it again once stored - a lost answer, a double tap - is answered with the report itself.
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields(),
+   'photo',jsonb_build_object('caption','The new seal in place','sha256',repeat('f',64),'bytes',98000)));
+ ASSERT r->>'status'='STORED' AND (r->>'already_sent')::boolean AND r->>'report_id'=rid::text, 'already sent: '||r;
 
  -- WF2 by notification: it reads the report by id.
  SELECT x INTO item FROM cbm_app.reports_for_wf2(rid) x;
@@ -455,13 +529,31 @@ DO $$ DECLARE r jsonb; item jsonb; rid uuid:=pg_temp.get('report')::uuid; tid in
  ASSERT NOT EXISTS (SELECT 1 FROM cbm_app.reports_for_wf2()), 'a claimed report is not offered again';
  ASSERT (SELECT submission_id FROM cbm_app.technician_reports WHERE id=rid) IS NOT NULL, 'the workflows own submission is recorded';
 
- -- The technician sees that it has been sent, and may write again after a rework.
+ -- The technician sees that it has been sent, and the job list does not offer it to be written
+ -- again: the ticket is still ASSIGNED, but this approval cycle has its report.
  r := cbm_app.my_report_state(pg_temp.get('tech'),tid);
  ASSERT (r->>'sent')::boolean AND r->>'state'='SUBMITTED', 'the app knows it was sent: '||r;
  ASSERT NOT (cbm_app.my_report_state(pg_temp.get('tech'),999999)->>'sent')::boolean, 'another ticket has no report';
+ SELECT x INTO item FROM jsonb_array_elements(cbm_app.technician_jobs(pg_temp.get('tech'))->'current') x
+ WHERE (x->>'ticket_id')::int=tid;
+ ASSERT item->>'report_state'='PROCESSING' AND NOT (item->>'report_needed')::boolean, 'not offered again: '||item;
+ -- A different report in the same cycle is refused, and said to be: not answered "sent" and dropped.
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields()||'{"findings":"A newly noticed crack."}'));
+ ASSERT r->>'status'='ALREADY_SENT' AND r->>'report_id'=rid::text, 'a second report in one cycle: '||r;
+ -- WF2 puts the job before the FM, in a new approval cycle, while the answer to the first send is
+ -- lost: the retry still gets its receipt.
+ UPDATE public.tickets SET status='PENDING_APPROVAL', approval_id=gen_random_uuid() WHERE id=tid;
+ r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
+   'report',pg_temp.report_fields(),
+   'photo',jsonb_build_object('caption','The new seal in place','sha256',repeat('f',64),'bytes',98000)));
+ ASSERT r->>'status'='STORED' AND (r->>'already_sent')::boolean AND r->>'report_id'=rid::text, 'the retry''s receipt: '||r;
+ -- The FM sends it back: a new round, and a new report for it.
+ UPDATE public.tickets SET status='REWORK' WHERE id=tid;
+ ASSERT NOT (cbm_app.my_report_state(pg_temp.get('tech'),tid)->>'sent')::boolean, 'the new round has no report yet';
  r := cbm_app.submit_technician_report(jsonb_build_object('token',pg_temp.get('tech'),'ticket_id',tid,
    'report',pg_temp.report_fields()||'{"findings":"Sent back: the corner still lets water in."}'));
- ASSERT r->>'status'='STORED', 'a second report may be written once the first is with the workflows: '||r;
+ ASSERT r->>'status'='STORED' AND r->>'report_id'<>rid::text, 'a report for the new round: '||r;
  ASSERT (SELECT count(*) FROM cbm_app.technician_reports)=2, 'two reports, one per round';
 END $$;
 
@@ -499,6 +591,16 @@ DO $$ DECLARE r jsonb; BEGIN
  BEGIN PERFORM 1 FROM public.tickets; RAISE EXCEPTION 'API login read workflow tickets';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN PERFORM cbm_app.open_session(gen_random_uuid(),gen_random_uuid(),'PASSWORD','OK'); RAISE EXCEPTION 'API login called an internal helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.password_input('x'); RAISE EXCEPTION 'API login called the password helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.is_calendar_date('2026-09-22'); RAISE EXCEPTION 'API login called the date helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.capture_geometry_valid('{}','{}',1,1); RAISE EXCEPTION 'API login called the geometry helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.cycle_report(1); RAISE EXCEPTION 'API login read a report through the cycle helper';
+ EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+ BEGIN PERFORM cbm_app.report_content('{}',NULL,NULL); RAISE EXCEPTION 'API login called the report helper';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN PERFORM public.cbm_intake_recover(); RAISE EXCEPTION 'API login ran a workflow function';
  EXCEPTION WHEN insufficient_privilege THEN NULL; END;

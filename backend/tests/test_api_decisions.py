@@ -5,15 +5,16 @@ which role reaches which endpoint, what a card looks like on the phone, and that
 workflows arrives as a 409 the app can act on.
 """
 
+import hashlib
 import json
 import os
 import uuid
 
 from fastapi.testclient import TestClient
 
-from cbm_api import internal
+from cbm_api import captures, internal
 from conftest import CODE, SITE, auth, device, new_email, sign_up
-from test_api_captures import jpeg, metadata, post
+from test_api_captures import header_only_jpeg, jpeg, metadata, post
 
 
 def approve(owner, membership_id):
@@ -306,3 +307,141 @@ def test_a_report_is_refused_unless_it_is_complete_and_the_job_is_theirs(client,
     # Sending the same report twice leaves one report, not two.
     assert send_report(client, token, tid, report_fields()).status_code == 202
     assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 1
+
+
+def test_a_report_with_a_photo_can_be_sent_again_after_it_went_through(client, owner):
+    """Audit 2026-09-24, finding 4: the answer to the first send was lost; the app sends again."""
+    token, tech_id = technician(client, owner, dev=51)
+    tid = assigned_ticket(owner, tech_id)
+    photo = jpeg(1280, 960, b"sent once")
+    fields = report_fields(photo_caption="The new seal in place")
+    first = send_report(client, token, tid, fields, photo)
+    again = send_report(client, token, tid, fields, photo)
+    assert first.status_code == 202, first.text
+    assert again.status_code == 202, again.text
+    assert again.json() == {"report_id": first.json()["report_id"], "status": "SENT"}
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 1
+
+
+def test_an_interrupted_report_is_replaced_whole_by_its_retry(client, owner, monkeypatch):
+    """Audit 2026-09-24, finding 5: the photo on disk is always the photo the report describes."""
+    token, tech_id = technician(client, owner, dev=52)
+    tid = assigned_ticket(owner, tech_id)
+    first_image = jpeg(1280, 960, b"first")
+    other_image = jpeg(1280, 960, b"changed after the failure")
+
+    real_store = captures.store
+
+    def disk_full(*args, **kwargs):
+        raise OSError("simulated disk failure after the claim")
+
+    monkeypatch.setattr(captures, "store", disk_full)
+    try:
+        send_report(client, token, tid, report_fields(photo_caption="first"), first_image)
+    except OSError:
+        pass
+    monkeypatch.setattr(captures, "store", real_store)
+    row = owner.execute("SELECT status FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()
+    assert row[0] == "RECEIVED"  # claimed, photo never stored
+
+    second = send_report(client, token, tid, report_fields(photo_caption="second"), other_image)
+    assert second.status_code == 202, second.text
+    report_id = second.json()["report_id"]
+    sha, size, caption, status = owner.execute(
+        "SELECT photo_sha256, photo_bytes, photo_caption, status FROM cbm_app.technician_reports WHERE id=%s",
+        [report_id]).fetchone()
+    on_disk = captures.report_path_for(os.environ["CBM_APP_CAPTURE_DIR"], report_id).read_bytes()
+    assert on_disk == other_image and sha == hashlib.sha256(other_image).hexdigest() and size == len(other_image)
+    assert caption == "second" and status == "STORED"
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 1
+
+
+def test_the_work_date_must_be_a_day_that_exists(client, owner):
+    """Audit 2026-09-24, finding 9."""
+    token, tech_id = technician(client, owner, dev=53)
+    tid = assigned_ticket(owner, tech_id)
+    for impossible in ("2026-99-99", "2026-02-29", "2026-04-31", "0000-01-01"):
+        r = send_report(client, token, tid, report_fields(work_date=impossible))
+        assert r.status_code == 422, (impossible, r.text)
+        assert "work date" in r.json()["message"], r.text
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 0
+    assert send_report(client, token, tid, report_fields(work_date="2028-02-29")).status_code == 202
+
+
+def test_a_report_photo_must_be_an_image(client, owner):
+    token, tech_id = technician(client, owner, dev=54)
+    tid = assigned_ticket(owner, tech_id)
+    r = send_report(client, token, tid, report_fields(photo_caption="none"), header_only_jpeg(1280, 960))
+    assert r.status_code == 422 and r.json()["error"] == "NOT_A_JPEG"
+    assert owner.execute("SELECT count(*) FROM cbm_app.technician_reports WHERE ticket_id=%s", [tid]).fetchone()[0] == 0
+
+
+def job_card(client, token, ticket_id: int) -> dict:
+    jobs = client.get("/v1/technician/jobs", headers=auth(token)).json()["current"]
+    return next(j for j in jobs if j["ticket_id"] == ticket_id)
+
+
+def wf2_takes(owner, report_id: str, ticket_id: int) -> None:
+    """What WF2 does with a stored report: claims it, and puts the job before the FM in a new
+    approval cycle ('Set Pending Approval' gives the ticket a new approval_id)."""
+    owner.execute("UPDATE cbm_app.technician_reports SET status='SUBMITTED' WHERE id=%s", [report_id])
+    owner.execute("UPDATE public.tickets SET status='PENDING_APPROVAL', approval_id=gen_random_uuid() WHERE id=%s",
+                  [ticket_id])
+
+
+def test_a_sent_report_is_not_offered_to_be_written_again(client, owner):
+    """Second audit 2026-09-24, finding 3: the ticket stays ASSIGNED until WF2 takes the report."""
+    token, tech_id = technician(client, owner, dev=55)
+    tid = assigned_ticket(owner, tech_id)
+    card = job_card(client, token, tid)
+    assert card["report_state"] == "TO_DO" and card["report_needed"] is True
+    first = send_report(client, token, tid, report_fields())
+    assert first.status_code == 202, first.text
+    card = job_card(client, token, tid)
+    assert card["report_state"] == "PROCESSING" and card["report_needed"] is False
+    # Other answers are refused, and said to be refused; the report that was sent stays as it was.
+    other = send_report(client, token, tid, report_fields(findings="A newly noticed crack needs attention."))
+    assert other.status_code == 409 and other.json()["error"] == "REPORT_ALREADY_SENT", other.text
+    assert other.json()["report_id"] == first.json()["report_id"]
+    assert owner.execute("SELECT report->>'findings' FROM cbm_app.technician_reports WHERE ticket_id=%s",
+                         [tid]).fetchone()[0] == report_fields()["findings"]
+    # The same answers again are a repeat, answered with the receipt.
+    again = send_report(client, token, tid, report_fields())
+    assert again.status_code == 202 and again.json() == {"report_id": first.json()["report_id"], "status": "SENT"}
+
+
+def test_a_retry_after_the_job_moved_on_gets_its_receipt(client, owner):
+    """Second audit 2026-09-24, finding 4: the first answer was lost, and WF2 took the report meanwhile."""
+    token, tech_id = technician(client, owner, dev=56)
+    tid = assigned_ticket(owner, tech_id)
+    photo = jpeg(1280, 960, b"after")
+    fields = report_fields(photo_caption="The new seal in place")
+    first = send_report(client, token, tid, fields, photo)
+    assert first.status_code == 202, first.text
+    wf2_takes(owner, first.json()["report_id"], tid)
+    again = send_report(client, token, tid, fields, photo)
+    assert again.status_code == 202, again.text
+    assert again.json() == {"report_id": first.json()["report_id"], "status": "SENT"}
+    assert job_card(client, token, tid)["report_state"] == "WITH_FM"
+    # It is not a way into a job under review: a different report is refused.
+    assert send_report(client, token, tid, report_fields(findings="Something else")).status_code == 409
+    # Nor a receipt for someone else: another technician gets nothing.
+    other, _ = technician(client, owner, dev=58)
+    assert send_report(client, other, tid, fields, photo).status_code == 404
+
+
+def test_after_a_rework_a_new_report_is_written(client, owner):
+    token, tech_id = technician(client, owner, dev=57)
+    tid = assigned_ticket(owner, tech_id)
+    first = send_report(client, token, tid, report_fields())
+    wf2_takes(owner, first.json()["report_id"], tid)
+    owner.execute("UPDATE public.tickets SET status='REWORK', fm_reject_reason='The corner still leaks.' WHERE id=%s",
+                  [tid])
+    card = job_card(client, token, tid)
+    assert card["report_state"] == "REWORK" and card["report_needed"] is True
+    assert client.get(f"/v1/technician/jobs/{tid}/report", headers=auth(token)).json()["sent"] is False
+    # The new round's report is a new report, even word for word the same as the first.
+    second = send_report(client, token, tid, report_fields())
+    assert second.status_code == 202, second.text
+    assert second.json()["report_id"] != first.json()["report_id"]
+    assert job_card(client, token, tid)["report_state"] == "PROCESSING"

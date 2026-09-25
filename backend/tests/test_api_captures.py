@@ -1,18 +1,44 @@
+import copy
 import hashlib
 import json
 import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from io import BytesIO
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from cbm_api import internal
+from cbm_api import captures, internal, main
 from conftest import SITE, auth, sign_up
 
 
-def jpeg(width: int, height: int, filler: bytes = b"") -> bytes:
-    """A minimal JPEG: start marker, a baseline frame header with the given size, end marker.
+@lru_cache(maxsize=None)
+def _encoded(width: int, height: int) -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (118, 128, 138)).save(buf, "JPEG", quality=60)
+    return buf.getvalue()
 
-    Enough for the API, which reads the frame header and never decodes pixels.
+
+def jpeg(width: int, height: int, filler: bytes = b"") -> bytes:
+    """A real JPEG of the given size. The API decodes what it accepts, so the fixture must decode.
+
+    The filler travels in a comment segment right after the start marker, which decoders skip: two
+    images with different fillers are different bytes (and hashes) but the same picture.
+    """
+    data = _encoded(width, height)
+    comment = b"\xff\xfe" + (2 + len(filler)).to_bytes(2, "big") + filler
+    return data[:2] + comment + data[2:]
+
+
+def header_only_jpeg(width: int, height: int, filler: bytes = b"") -> bytes:
+    """Start marker, a baseline frame header with the given size, end marker - and no pixels.
+
+    Its header claims an image and there is none behind it; the API must refuse it.
     """
     sof = (b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big")
            + b"\x03" + b"\x01\x11\x00\x02\x11\x00\x03\x11\x00")
@@ -93,6 +119,31 @@ def test_the_bytes_must_be_the_photo_the_metadata_describes(client):
     assert r.status_code == 422 and r.json()["error"] == "NOT_A_JPEG"
 
 
+def test_a_jpeg_header_with_no_image_behind_it_is_refused(client, owner):
+    """Audit 2026-09-24, finding 10: a frame header is a claim, not an image."""
+    token = reporter(client)
+    empty = header_only_jpeg(960, 1280, b"no compressed pixel data")
+    meta = metadata(empty)
+    r = post(client, token, meta, empty)
+    assert r.status_code == 422 and r.json()["error"] == "NOT_A_JPEG", r.text
+    # Cut short after the header: truncated pixel data is refused as well.
+    whole = jpeg(960, 1280, b"z")
+    cut = whole[: len(whole) // 2]
+    assert post(client, token, metadata(cut), cut).json()["error"] == "NOT_A_JPEG"
+    assert owner.execute("SELECT count(*) FROM cbm_app.report_photos WHERE capture_id=%s", [meta["capture_id"]]).fetchone()[0] == 0
+
+
+def test_a_description_over_500_characters_is_named(client):
+    """Audit 2026-09-24, finding 6: the app is told which field to correct, not "not valid"."""
+    token = reporter(client)
+    image = jpeg(960, 1280, b"long description")
+    r = post(client, token, metadata(image, description="x" * 501), image)
+    assert r.status_code == 422 and r.json()["error"] == "DESCRIPTION_TOO_LONG", r.text
+    assert "500" in r.json()["message"]
+    fixed = metadata(image, description="x" * 500)
+    assert post(client, token, fixed, image).status_code == 202
+
+
 def test_the_database_enforces_the_frame_invariant(client, owner):
     token = reporter(client)
     image = jpeg(960, 1280, b"y")
@@ -101,6 +152,80 @@ def test_the_database_enforces_the_frame_invariant(client, owner):
     assert r.status_code == 422 and r.json()["error"] == "INVALID_CAPTURE"
     assert owner.execute("SELECT count(*) FROM cbm_app.reports WHERE id=%s", [meta["report_id"]]).fetchone()[0] == 0
     assert not os.path.exists(os.path.join(os.environ["CBM_APP_CAPTURE_DIR"], f"app-{meta['capture_id']}.jpg"))
+
+
+# Second audit 2026-09-24, finding 5: geometry the ray to the damage cannot be cast from.
+GEOMETRY_GAPS = {
+    "no camera": lambda m: m.update(camera={}),
+    "no tap": lambda m: m["target"].update(pixel={}),
+    "zero focal length": lambda m: m["camera"].update(fx=0),
+    "null camera and tap": lambda m: m.update(camera=None, target={"pixel": None, "source": "USER_TAP"}),
+    "focal length as text": lambda m: m["camera"].update(fy="955"),
+    "centre outside the image": lambda m: m["camera"].update(cx=-1),
+    "no source for K": lambda m: m["camera"].pop("source"),
+    "trusted not a boolean": lambda m: m["camera"].update(trusted="yes"),
+}
+
+
+@pytest.mark.parametrize("gap", GEOMETRY_GAPS)
+def test_a_capture_without_usable_geometry_is_refused(client, owner, gap):
+    token = reporter(client)
+    image = jpeg(960, 1280, gap.encode())
+    meta = metadata(image)
+    GEOMETRY_GAPS[gap](meta)
+    r = post(client, token, meta, image)
+    assert r.status_code == 422 and r.json()["error"] == "INVALID_CAPTURE", r.text
+    assert owner.execute("SELECT count(*) FROM cbm_app.report_photos WHERE capture_id=%s",
+                         [meta["capture_id"]]).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("gap", GEOMETRY_GAPS)
+def test_the_database_refuses_the_same_geometry(client, owner, monkeypatch, gap):
+    """The API's check skipped: the table's own constraint refuses what it would have."""
+    monkeypatch.setattr(captures, "check_geometry", lambda meta: None)
+    token = reporter(client)
+    image = jpeg(960, 1280, gap.encode())
+    meta = metadata(image)
+    GEOMETRY_GAPS[gap](meta)
+    r = post(client, token, meta, image)
+    assert r.status_code == 422 and r.json()["error"] == "INVALID_CAPTURE", r.text
+    assert owner.execute("SELECT count(*) FROM cbm_app.reports WHERE id=%s", [meta["report_id"]]).fetchone()[0] == 0
+
+
+def test_numbers_json_does_not_have_are_refused(client):
+    """NaN and Infinity are read by Python's json but are not JSON: refused, not a 500 from the database."""
+    token = reporter(client)
+    image = jpeg(960, 1280, b"nan")
+    for bad in ('"centrality": NaN', '"centrality": 1e400', '"centrality": -Infinity'):
+        text = json.dumps(metadata(image)).replace('"centrality": 0.1', bad)
+        r = client.post("/v1/captures", headers=auth(token), data={"metadata": text},
+                        files={"image": ("capture.jpg", image, "image/jpeg")})
+        assert r.status_code == 422 and r.json()["error"] == "INVALID_REQUEST", (bad, r.text)
+
+
+def test_overlapping_retries_of_one_photo_are_both_answered(client, owner, monkeypatch):
+    """Second audit 2026-09-24, finding 6: the original and its retry write the file at the same moment."""
+    token = reporter(client)
+    image = jpeg(960, 1280, b"overlap")
+    meta = metadata(image)
+    both_written = threading.Barrier(2)
+    real_fsync = captures.os.fsync
+
+    def fsync_together(fd):
+        real_fsync(fd)
+        both_written.wait(timeout=10)  # both files are on disk and neither has been renamed yet
+
+    monkeypatch.setattr(captures.os, "fsync", fsync_together)
+    http = TestClient(main.app, raise_server_exceptions=False)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        codes = list(pool.map(lambda _: post(http, token, copy.deepcopy(meta), image).status_code, range(2)))
+    http.close()
+    assert codes == [202, 202], codes
+    store = Path(os.environ["CBM_APP_CAPTURE_DIR"])
+    assert (store / f"app-{meta['capture_id']}.jpg").read_bytes() == image
+    assert not list(store.glob(f"app-{meta['capture_id']}*.part")), "no temporary file is left behind"
+    assert owner.execute("SELECT status FROM cbm_app.report_photos WHERE capture_id=%s",
+                         [meta["capture_id"]]).fetchone()[0] == "STORED"
 
 
 def test_only_a_reporter_session_can_upload(client):

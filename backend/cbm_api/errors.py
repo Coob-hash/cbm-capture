@@ -13,6 +13,7 @@ _HTTP = {
     "INVALID_SITE_CODE": 422, "INVALID": 422, "SITE_MISMATCH": 422,
     "ACCOUNT_EXISTS": 409, "ALREADY_BOUND": 409, "CONFLICT": 409,
     "BLOCKED": 409, "OFFER_GONE": 409, "REASON_REQUIRED": 422, "INVALID_REPORT": 422,
+    "DESCRIPTION_TOO_LONG": 422, "REPORT_ALREADY_SENT": 409,
     "INVALID_CREDENTIALS": 401, "INVALID_GOOGLE_IDENTITY": 401, "UNAUTHENTICATED": 401,
     "LOCKED": 429,
     "DISABLED": 403, "FORBIDDEN": 403,
@@ -42,12 +43,17 @@ _MESSAGES = {
     "OFFER_GONE": "This offer is no longer open.",
     "REASON_REQUIRED": "Say why, in a few words.",
     "INVALID_REPORT": "The report is not complete. Check the dates, the answers and the confirmation.",
+    "DESCRIPTION_TOO_LONG": "The description is longer than 500 characters. Shorten it and send it again.",
+    "REPORT_ALREADY_SENT": "The report for this job has already been sent, so these answers were not saved. "
+                           "If something needs changing, the facility manager can send the job back to you.",
 }
 
 
-def fail(code: str, http: int | None = None, message: str | None = None, headers: dict | None = None):
+def fail(code: str, http: int | None = None, message: str | None = None, headers: dict | None = None,
+         extra: dict | None = None):
+    """Raise the error. extra adds fields to the body, next to error and message."""
     raise HTTPException(status_code=http or _HTTP.get(code, 400),
-                        detail={"error": code, "message": message or _MESSAGES.get(code, code)},
+                        detail={"error": code, "message": message or _MESSAGES.get(code, code)} | (extra or {}),
                         headers=headers)
 
 

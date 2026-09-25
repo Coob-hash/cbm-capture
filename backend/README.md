@@ -19,7 +19,7 @@ run on top of the same PostgreSQL database (schema `public`) and never receive c
 | `migrations/003_decisions.sql` | What the FM and the technician decide from the phone. No second decision path: it authenticates, checks the site, and calls the workflows' own guarded functions. |
 | `cbm_api/` | FastAPI service: HTTP, Google token verification, rate and size limits. |
 | `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`, `test_api_decisions.py`), `run-tests.sh`. |
-| `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, and `Approve-CbmFm.ps1` (list, approve or reject FM requests). |
+| `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, and `Approve-CbmFm.ps1` (list, approve or reject pending requests: FMs, and technicians whose email is already on the dispatch list). |
 | `n8n/` | The WF1 app branch: patch script and tests. |
 
 ## Where the rules live
@@ -55,23 +55,23 @@ for).
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/healthz` | — | Database reachable |
-| POST | `/v1/auth/signup` | site code | Email + password + role. `USER` and `TECHNICIAN` active at once (a technician is linked to dispatch); `FM` pending until the operator approves it |
+| POST | `/v1/auth/signup` | site code | Email + password + role. `USER` and a new `TECHNICIAN` active at once (a new dispatch row, no skills); `FM` pending until the operator approves it, and so is a `TECHNICIAN` whose email already names a dispatch row, until the operator links it |
 | POST | `/v1/auth/signup/google` | site code | Google ID token + role |
 | POST | `/v1/auth/login` | — | Email + password → one-hour session |
 | POST | `/v1/auth/login/google` | — | Google ID token → one-hour session |
 | POST | `/v1/auth/role` | Bearer | Bind the session to one membership when the person holds several |
 | GET | `/v1/me` | Bearer | Account, current membership (including `PENDING`), expiry |
 | POST | `/v1/auth/logout` | Bearer | Revoke the session |
-| POST | `/v1/captures` | Bearer (reporter) | Multipart `metadata` (JSON) + `image` (JPEG, ≤ 5 MiB). Checks SHA-256 and the decoded frame size, stores the image, marks it `STORED`, which notifies WF1. Repeatable per `capture_id` |
+| POST | `/v1/captures` | Bearer (reporter) | Multipart `metadata` (JSON) + `image` (JPEG, ≤ 5 MiB). Checks SHA-256, decodes the JPEG (Pillow; a header with no pixels is refused) and its size, stores the image, marks it `STORED`, which notifies WF1. Repeatable per `capture_id`, also by two requests at once (each write has its own temporary file). A description over 500 characters is `422 DESCRIPTION_TOO_LONG`. The camera and the tap must be complete and usable - K an object with positive focal lengths and its centre in the frame, K's size the image's, the tap in the frame, `source` and `trusted` present - or `422 INVALID_CAPTURE`; the table refuses the same (`report_photos_geometry`). `NaN`/`Infinity` in the metadata is `422 INVALID_REQUEST` |
 | GET | `/v1/reports` | Bearer (reporter) | Own reports with a plain-language status code |
 | GET | `/v1/fm/queue` | Bearer (FM) | The two queues that wait for a decision — interventions to authorize, completions to approve — plus the site's counts |
 | POST | `/v1/fm/decisions` | Bearer (FM) | `approve_intervention` · `reject_intervention` · `approve_completion` · `request_rework`. A rejection or rework needs a reason. `409 BLOCKED` when the ticket moved on |
 | GET | `/v1/photos/{capture_id}` | Bearer (FM, or the technician on that job) | The reporter's photo behind a card |
-| GET | `/v1/technician/jobs` | Bearer (technician) | Offers to answer, jobs in hand, work completed, own skills |
+| GET | `/v1/technician/jobs` | Bearer (technician) | Offers to answer, jobs in hand, work completed, own skills. A job whose report was sent this approval cycle is `report_state = PROCESSING`, `report_needed = false`, until WF2 moves the ticket on |
 | POST | `/v1/technician/offers` | Bearer (technician) | Accept or decline an offer. `409 OFFER_GONE` when it expired or was answered |
 | POST | `/v1/technician/skills` | Bearer (technician) | Their own skills, from the listed vocabulary. Nobody else sets them |
-| POST | `/v1/technician/jobs/{id}/report` | Bearer (technician) | The work report: multipart `report` (the template's fields) and an optional `photo` (JPEG). The document is rendered by WF2, not here |
-| GET | `/v1/technician/jobs/{id}/report` | Bearer (technician) | Whether this job's report has already been written |
+| POST | `/v1/technician/jobs/{id}/report` | Bearer (technician) | The work report: multipart `report` (the template's fields; the work date a real day) and an optional `photo` (a decodable JPEG). One report per approval cycle, counted as the workflows count it (`approval_id`, or `initial`). A repeat of this cycle's report answers with the same receipt - also after WF2 has taken it and moved the ticket on; a different report in a cycle that has one is `409 REPORT_ALREADY_SENT` (with its `report_id`), never answered "sent" and dropped; after a rework it is a new report. A retry after an interrupted upload replaces it whole. The document is rendered by WF2, not here |
+| GET | `/v1/technician/jobs/{id}/report` | Bearer (technician) | Whether this job's report has been sent in its current approval cycle |
 | GET | `/v1/technician/jobs/{id}/report-link` | Bearer (technician) | A link to the workflows' report template, kept for the browser route |
 
 The internal image service (`cbm_api.internal`, container `api-internal`, alias

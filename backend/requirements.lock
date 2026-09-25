@@ -10,6 +10,7 @@ fastapi==0.141.1
 google-auth==2.58.0
 h11==0.16.0
 idna==3.20
+pillow==12.3.0
 psycopg==3.3.5
 psycopg-binary==3.3.5
 psycopg-pool==3.3.2

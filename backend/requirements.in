@@ -7,3 +7,5 @@ psycopg-pool
 google-auth
 requests
 python-multipart
+# Decodes uploaded photos, so a JPEG header with no image behind it is refused.
+pillow==12.3.0

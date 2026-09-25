@@ -239,11 +239,17 @@ BEGIN
       jsonb_build_object('id',o.offer->>'id','date',o.offer->>'date','slot',o.offer->>'slot',
         'expires_at',o.offer->>'expires_at'))
     ORDER BY (o.offer->>'expires_at')) FROM live_offers(v_tech) o),'[]'::jsonb),
+  -- A job whose report has been sent in this cycle is not offered as one to write, although the
+  -- ticket stays ASSIGNED/REWORK until WF2 takes the report: PROCESSING. cycle_report is defined
+  -- in 004_technician_reports.sql, with its table; PL/pgSQL resolves it when this runs.
   'current',coalesce((SELECT jsonb_agg(job_card(t2.id)||jsonb_build_object(
-      'report_needed',t2.status IN ('ASSIGNED','REWORK'),
-      'report_state',CASE t2.status WHEN 'ASSIGNED' THEN 'TO_DO' WHEN 'REWORK' THEN 'REWORK'
-        WHEN 'PENDING_APPROVAL' THEN 'WITH_FM' ELSE 'SENT' END) ORDER BY t2.scheduled_date, t2.id)
-    FROM public.tickets t2 WHERE t2.technician_id = v_tech
+      'report_needed',t2.status IN ('ASSIGNED','REWORK') AND NOT rep.sent,
+      'report_state',CASE WHEN t2.status IN ('ASSIGNED','REWORK') AND rep.sent THEN 'PROCESSING'
+        ELSE CASE t2.status WHEN 'ASSIGNED' THEN 'TO_DO' WHEN 'REWORK' THEN 'REWORK'
+        WHEN 'PENDING_APPROVAL' THEN 'WITH_FM' ELSE 'SENT' END END) ORDER BY t2.scheduled_date, t2.id)
+    FROM public.tickets t2
+    CROSS JOIN LATERAL (SELECT coalesce((cycle_report(t2.id)).status IN ('STORED','SUBMITTED'), false) AS sent) rep
+    WHERE t2.technician_id = v_tech
       AND t2.status IN ('ASSIGNED','WORK_DONE','PENDING_APPROVAL','REWORK')),'[]'::jsonb),
   'completed',coalesce((SELECT jsonb_agg(job_card(t3.id) ORDER BY t3.closed_at DESC)
     FROM (SELECT * FROM public.tickets WHERE technician_id = v_tech AND status='CLOSED'

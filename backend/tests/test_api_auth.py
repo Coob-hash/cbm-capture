@@ -85,6 +85,76 @@ def test_technician_joins_freely_and_only_fm_waits(client):
     assert me["membership"]["role"] == "FM" and me["membership"]["status"] == "PENDING"
 
 
+def test_an_existing_technician_is_not_taken_over_by_a_password_sign_up(client, owner):
+    """Audit 2026-09-24, finding 1: knowing a technician's email is not being that technician."""
+    from test_api_decisions import assigned_ticket
+    email = new_email()
+    tech = owner.execute("INSERT INTO public.technicians(full_name,email,skills) "
+                         "VALUES ('Existing technician',%s,ARRAY['carpentry']) RETURNING id", [email]).fetchone()[0]
+    tid = assigned_ticket(owner, tech)
+
+    _, r = sign_up(client, role="TECHNICIAN", email=email, dev=41)
+    assert r.status_code == 201, r.text
+    membership = r.json()["memberships"][0]
+    assert membership["status"] == "PENDING" and membership["technician_id"] is None
+    token = r.json()["token"]
+    assert client.get("/v1/me", headers=auth(token)).json()["membership"]["status"] == "PENDING"
+    assert client.get("/v1/technician/jobs", headers=auth(token)).status_code == 401  # their jobs stay theirs
+
+    # The operator checks it is them, and links the row: the jobs are theirs from then on.
+    decided = owner.execute("SELECT cbm_app.decide_membership(jsonb_build_object('membership_id',%s::uuid,"
+                            "'decision','APPROVE','operator',true))", [membership["id"]]).fetchone()[0]
+    assert decided["status"] == "APPROVED" and decided["technician_id"] == tech
+    jobs = client.get("/v1/technician/jobs", headers=auth(token))
+    assert jobs.status_code == 200 and tid in [j["ticket_id"] for j in jobs.json()["current"]]
+
+    # A new address is still a new technician, active at once.
+    _, fresh = sign_up(client, role="TECHNICIAN", dev=42)
+    assert fresh.json()["memberships"][0]["status"] == "ACTIVE"
+    assert fresh.json()["memberships"][0]["technician_id"] not in (None, tech)
+
+
+def test_a_verified_google_address_links_its_technician(client, owner, monkeypatch):
+    email = new_email()
+    tech = owner.execute("INSERT INTO public.technicians(full_name,email,skills) "
+                         "VALUES ('Google technician',%s,ARRAY['hvac']) RETURNING id", [email]).fetchone()[0]
+    monkeypatch.setattr(google_id, "verify", lambda token, ids: {"subject": "g-" + email, "email": email,
+                                                                 "email_verified": True, "name": "Gus"})
+    r = client.post("/v1/auth/signup/google", json={"site_code": CODE, "role": "TECHNICIAN", "id_token": "t",
+                                                    "device": device(43)})
+    assert r.status_code == 201, r.text
+    assert r.json()["memberships"][0]["status"] == "ACTIVE" and r.json()["memberships"][0]["technician_id"] == tech
+
+
+def test_every_character_of_a_long_password_counts(client):
+    """Audit 2026-09-24, finding 8: bcrypt reads 72 bytes; the API accepts 128 characters."""
+    head = "x" * 72
+    email, r = sign_up(client, password=head + "A", dev=44)
+    assert r.status_code == 201
+    wrong = client.post("/v1/auth/login", json={"email": email, "password": head + "B", "device": device(44)})
+    assert wrong.status_code == 401 and wrong.json()["error"] == "INVALID_CREDENTIALS"
+    right = client.post("/v1/auth/login", json={"email": email, "password": head + "A", "device": device(44)})
+    assert right.status_code == 200
+    # The same with characters of two bytes each: 36 of them fill bcrypt's 72.
+    head = "é" * 36
+    email, r = sign_up(client, password=head + "A", dev=45)
+    assert r.status_code == 201
+    assert client.post("/v1/auth/login", json={"email": email, "password": head + "B", "device": device(45)}).status_code == 401
+    assert client.post("/v1/auth/login", json={"email": email, "password": head + "A", "device": device(45)}).status_code == 200
+
+
+def test_a_password_hash_from_before_is_replaced_at_login(client, owner):
+    email, r = sign_up(client, dev=46)
+    uid = r.json()["user"]["id"]
+    owner.execute("UPDATE cbm_app.password_credentials SET password_hash=crypt('long-enough-1',gen_salt('bf',4)), "
+                  "scheme='bcrypt' WHERE user_id=%s", [uid])
+    login = client.post("/v1/auth/login", json={"email": email, "password": "long-enough-1", "device": device(46)})
+    assert login.status_code == 200
+    assert owner.execute("SELECT scheme FROM cbm_app.password_credentials WHERE user_id=%s", [uid]).fetchone()[0] == "bcrypt-sha256"
+    again = client.post("/v1/auth/login", json={"email": email, "password": "long-enough-1", "device": device(46)})
+    assert again.status_code == 200
+
+
 def test_role_choice_when_holding_two_roles(client, owner):
     email, r = sign_up(client)
     owner.execute("INSERT INTO cbm_app.memberships(user_id,site_id,role,status) "

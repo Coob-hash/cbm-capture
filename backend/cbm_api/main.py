@@ -10,10 +10,12 @@ verification, request-size and per-address rate limits, and never echoing a requ
 
 import hashlib
 import json
+import math
 import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -21,7 +23,7 @@ import psycopg
 from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import captures, config, google_id
@@ -136,6 +138,12 @@ class ReportFields(Strict):
     remaining_issues: str = Field(min_length=1, max_length=4000)
     declaration: bool
     photo_caption: str | None = Field(default=None, max_length=500)
+
+    @field_validator("work_date")
+    @classmethod
+    def _a_day_that_exists(cls, value: str) -> str:
+        date.fromisoformat(value)  # the pattern checked the shape; 2026-99-99 is refused here
+        return value
 
 
 # ---- Cross-cutting guards ----------------------------------------------------------------------
@@ -290,8 +298,8 @@ def submit_capture(token: Annotated[str, Depends(bearer)],
     STORED, which notifies the workflows. Safe to repeat with the same capture_id.
     """
     try:
-        meta = json.loads(metadata)
-    except ValueError:
+        meta = json.loads(metadata, parse_constant=_not_json, parse_float=_finite_float)
+    except (ValueError, RecursionError):
         fail("INVALID_REQUEST", http=422, message="metadata is not valid JSON.")
     if not isinstance(meta, dict):
         fail("INVALID_REQUEST", http=422, message="metadata must be a JSON object.")
@@ -300,6 +308,7 @@ def submit_capture(token: Annotated[str, Depends(bearer)],
         fail("TOO_LARGE", http=413, message="The image is too large.")
     try:
         captures.check_image(data, meta)
+        captures.check_geometry(meta)
     except captures.ImageError as exc:
         fail(exc.code, http=422, message=str(exc))
     try:
@@ -314,6 +323,19 @@ def submit_capture(token: Annotated[str, Depends(bearer)],
     captures.store(settings.capture_dir, claim["capture_id"], data)
     stored = check(db.call("store_capture", token, {"capture_id": claim["capture_id"], "image_bytes": len(data)}), ok="STORED")
     return {"capture_id": stored["capture_id"], "report_id": stored["report_id"], "status": "STORED"}
+
+
+def _not_json(constant: str):
+    """Python's json reads NaN and Infinity; JSON has no such numbers, and the database refuses them."""
+    raise ValueError(f"{constant} is not a JSON number")
+
+
+def _finite_float(text: str) -> float:
+    """A number too large for a float (1e400) would be read as infinity: refused like Infinity."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} is out of range")
+    return value
 
 
 @app.get("/v1/reports")
@@ -398,7 +420,10 @@ def submit_report(ticket_id: int,
         fail("NOT_FOUND")
     try:
         fields = ReportFields.model_validate_json(report)
-    except ValueError:
+    except ValidationError as exc:
+        if any(e["loc"] and e["loc"][0] == "work_date" for e in exc.errors()):
+            fail("INVALID_REPORT", http=422,
+                 message="The work date is not a real date. Write it as YYYY-MM-DD, for example 2026-09-22.")
         fail("INVALID_REPORT", http=422)
     if not fields.declaration:
         fail("INVALID_REPORT", http=422, message="Confirm the declaration before sending the report.")
@@ -409,22 +434,46 @@ def submit_report(ticket_id: int,
     if data:
         if len(data) > settings.max_capture_bytes:
             fail("TOO_LARGE", http=413, message="The photo is too large.")
-        if captures.jpeg_size(data) is None:
-            fail("NOT_A_JPEG", http=422, message="The photo must be a JPEG.")
+        if captures.decoded_jpeg_size(data) is None:
+            fail("NOT_A_JPEG", http=422, message="The photo could not be read as a JPEG image.")
         payload["photo"] = {"caption": fields.photo_caption, "bytes": len(data),
                             "sha256": hashlib.sha256(data).hexdigest()}
     elif fields.photo_caption:
         fail("INVALID_REPORT", http=422, message="There is a caption but no photo.")
 
-    claim = check(db.call("submit_technician_report", payload), ok="UPLOAD" if data else "STORED")
-    if not data:
-        return {"report_id": claim["report_id"], "status": "SENT"}
-    if claim.get("already_sent"):
-        return {"report_id": claim["report_id"], "status": "SENT"}
-    path = captures.report_path_for(settings.capture_dir, claim["report_id"])
-    captures.store(settings.capture_dir, claim["report_id"], data, target=path)
-    stored = check(db.call("store_technician_report", token, {"report_id": claim["report_id"]}), ok="STORED")
+    # One request at a time per ticket, from the claim to the stored photo: a retry cannot write its
+    # bytes between another request's write and its "stored". The database checks the hash as well.
+    with _report_lock(ticket_id):
+        result = db.call("submit_technician_report", payload)
+        # Already sent - a double tap, or a retry after the first answer was lost, even once the
+        # workflows have moved the job on: the same receipt.
+        if result is not None and result.get("already_sent"):
+            return {"report_id": result["report_id"], "status": "SENT"}
+        # This round's report was already sent and this one says something else: it is refused, not
+        # answered "sent" while its answers are dropped.
+        if result is not None and result.get("status") == "ALREADY_SENT":
+            fail("REPORT_ALREADY_SENT",
+                 extra={"report_id": result["report_id"]} if result.get("report_id") else None)
+        claim = check(result, ok="UPLOAD" if data else "STORED")
+        if not data:
+            return {"report_id": claim["report_id"], "status": "SENT"}
+        path = captures.report_path_for(settings.capture_dir, claim["report_id"])
+        captures.store(settings.capture_dir, claim["report_id"], data, target=path)
+        stored = db.call("store_technician_report", token,
+                         {"report_id": claim["report_id"], "photo_sha256": payload["photo"]["sha256"]})
+        if stored is not None and stored.get("status") == "CONFLICT":
+            fail("CONFLICT", message="The report changed while its photo was being sent. Send it again.")
+        stored = check(stored, ok="STORED")
     return {"report_id": stored["report_id"], "status": "SENT"}
+
+
+# Striped locks: enough to keep two requests for the same ticket apart in this process, without
+# a lock object per ticket ever created. (The API runs as one process; see the Dockerfile.)
+_REPORT_LOCKS = [threading.Lock() for _ in range(64)]
+
+
+def _report_lock(ticket_id: int) -> threading.Lock:
+    return _REPORT_LOCKS[ticket_id % len(_REPORT_LOCKS)]
 
 
 @app.get("/v1/technician/jobs/{ticket_id}/report")
