@@ -118,9 +118,12 @@ Rules that follow from the matrix:
   one membership**, so every screen and endpoint still serves a single role; switching role means
   logging in again. This also covers several FMs across the places where the app is installed.
 - **Users and technicians join freely; only FMs are approved.** Anyone with the site's code can
-  sign up as `USER` or `TECHNICIAN`, active at once: nobody confirms them. A technician account is
-  linked to the `technicians` row with the same email (keeping its skills) or gets a new row with no
-  skills, which dispatch never selects until skills are set (Q17). `FM` can authorize work and close
+  sign up as `USER` or `TECHNICIAN`, active at once: nobody confirms them. A new technician gets a new
+  `technicians` row with no skills, which dispatch never selects until skills are set (Q17). An email
+  that already names a technician on the dispatch list is the exception (audit 24 Sep, finding 1):
+  a password sign-up proves nothing about owning that mailbox, and the row carries someone's jobs and
+  history, so the account waits until the operator has checked it is them and links the row
+  (`Approve-CbmFm.ps1`, skills kept). A Google address is verified by Google and links at once. `FM` can authorize work and close
   tickets, so it stays `PENDING` until the operator approves it (`backend/deploy/Approve-CbmFm.ps1`);
   the person can log in meanwhile and sees "waiting for approval". Nobody approves their own
   request.
@@ -157,7 +160,8 @@ Rules that follow from the matrix:
 - **Every use starts with a login.** A login opens a session of **exactly one hour**, never extended
   by activity; after that the app returns to the login screen. The hour is a database constraint
   (`cbm_app.sessions`), so no endpoint can issue a longer session by mistake.
-- **Password login**: bcrypt (cost 12) in PostgreSQL. Five wrong passwords lock the account for
+- **Password login**: bcrypt (cost 12) in PostgreSQL, over SHA-256 of the password, so every one of
+  its up to 128 characters counts (bcrypt alone reads 72 bytes; audit 24 Sep, finding 8). Five wrong passwords lock the account for
   15 minutes; an unknown email and a wrong password get the same answer. **Google login**: the app
   obtains a Google ID token; n8n verifies its signature, audience and expiry and passes only the
   verified claims to the database. A verified Google email may link to an existing password account
@@ -581,8 +585,8 @@ and its access code existed).
 |---|---|
 | Session ≤ 1 hour, never extended | `CHECK (expires_at <= created_at + 1 h)`; `authenticate()` never updates `expires_at` |
 | Tokens never stored | only `SHA-256(token)`; the token is returned once, at login |
-| Passwords | bcrypt cost 12 (`pgcrypto`), in a separate table |
-| Only FM is a request | `sign_up()`: `USER` and `TECHNICIAN` active, `FM` `PENDING`; `ADMIN` not selectable |
+| Passwords | bcrypt cost 12 (`pgcrypto`) over `base64(sha256(password))`, in a separate table; older raw hashes replaced at login |
+| Only FM is a request - and taking over a technician's row | `sign_up()`: `USER` and a new `TECHNICIAN` active, `FM` `PENDING`, a password `TECHNICIAN` whose email is already on the dispatch list `PENDING` until the operator links it; `ADMIN` not selectable |
 | Active technician ⇒ linked `technicians` row, one account per row | `CHECK` + partial unique index |
 | Frame invariant of the capture (K, image, tap in one coordinate system) | `CHECK`s on `report_photos` |
 | Reporter sees and writes only own reports, only in the session's site | `claim_capture()`, `attach_capture()`, `reporter_reports()` |
