@@ -19,8 +19,8 @@ android {
         // adaptive-icon and EncryptedSharedPreferences paths simple with no legacy branches.
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.0.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The App API's public address, e.g. https://<your-ngrok-domain>/ . Kept out of Git: set

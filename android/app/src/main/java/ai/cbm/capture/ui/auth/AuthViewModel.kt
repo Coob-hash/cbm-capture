@@ -76,17 +76,20 @@ class AuthViewModel @Inject constructor(
 
     fun refresh(onDone: (Session) -> Unit) = run(onDone) { auth.refresh() }
 
+    /**
+     * Ends the session and returns to Log in, now. Nothing here waits for the server: [onDone] used
+     * to run when its answer came, and an answer 30 seconds late reset the form and navigated to
+     * Log in over the next person's session (third audit 2026-09-25, finding 4).
+     */
     fun logout(onDone: () -> Unit) {
-        viewModelScope.launch {
-            auth.logout()
-            // The form may have been made while a session was open (the app started logged in):
-            // the account that just left is the one Log in offers.
-            _form.update {
-                it.copy(email = it.email.ifBlank { store.lastEmail.orEmpty() }, password = "", busy = false, error = null)
-            }
-            emailOfLastAccount = _form.value.email.isNotBlank()
-            onDone()
+        auth.logout()
+        // The form may have been made while a session was open (the app started logged in):
+        // the account that just left is the one Log in offers.
+        _form.update {
+            it.copy(email = it.email.ifBlank { store.lastEmail.orEmpty() }, password = "", busy = false, error = null)
         }
+        emailOfLastAccount = _form.value.email.isNotBlank()
+        onDone()
     }
 
     private fun run(onDone: (Session) -> Unit, call: suspend () -> AuthResult) {

@@ -2,8 +2,8 @@ package ai.cbm.capture.ui.home
 
 import ai.cbm.capture.data.local.OutboxStatus
 import ai.cbm.capture.data.remote.AppApi
-import ai.cbm.capture.data.remote.NETWORK_MESSAGE
 import ai.cbm.capture.data.remote.bearer
+import ai.cbm.capture.data.remote.networkMessage
 import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.ReporterStatus
 import ai.cbm.capture.domain.model.CaptureContract
@@ -53,7 +53,8 @@ class ReporterHomeViewModel @Inject constructor(
             siteCode = session?.membership?.siteId.orEmpty(),
             email = session?.email.orEmpty(),
             expiresAtMillis = session?.expiresAt?.toEpochMilli(),
-            items = buildHomeItems(l, s),
+            items = buildHomeItems(l, s, siteId = session?.membership?.siteId,
+                siteNames = session?.memberships.orEmpty().associate { it.siteId to it.siteName }),
             loading = busy,
             error = err
         )
@@ -79,7 +80,7 @@ class ReporterHomeViewModel @Inject constructor(
                     else -> error.value = "Could not load your reports. Pull down to try again."
                 }
             } catch (e: IOException) {
-                error.value = NETWORK_MESSAGE
+                error.value = networkMessage(e)
             } finally {
                 loading.value = false
             }
@@ -100,21 +101,39 @@ private val DATE = DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm", Locale.ENGLI
 /**
  * Photos still on the phone first (waiting, sending, refused), then the server's reports, newest
  * first. A delivered photo disappears into its report once the server lists it.
+ *
+ * [siteId] is the session's site. A photo taken at another of the person's sites is sent only under
+ * a session there, so while it waits it says where ([siteNames] names the sites); once sent, it
+ * belongs to that site's list, not this one.
  */
-internal fun buildHomeItems(local: List<ReportItem>, server: List<ReportSummary>, zone: ZoneId = ZoneId.systemDefault()): List<HomeItem> {
+internal fun buildHomeItems(
+    local: List<ReportItem>,
+    server: List<ReportSummary>,
+    zone: ZoneId = ZoneId.systemDefault(),
+    siteId: String? = null,
+    siteNames: Map<String, String> = emptyMap()
+): List<HomeItem> {
     val serverIds = server.map { it.reportId }.toSet()
     val pendingReports = local.filter { it.status == OutboxStatus.QUEUED || it.status == OutboxStatus.UPLOADING }.map { it.reportId }.toSet()
-    val onPhone = local.filter { it.status != OutboxStatus.DELIVERED || it.reportId !in serverIds }.map { row ->
+    val onPhone = local.filter { row ->
+        if (siteId != null && row.siteId != siteId) row.status != OutboxStatus.DELIVERED
+        else row.status != OutboxStatus.DELIVERED || row.reportId !in serverIds
+    }.map { row ->
+        val elsewhere = siteId != null && row.siteId != siteId
         HomeItem(
             key = "local-${row.captureId}",
             title = row.summary,
-            status = when (row.status) {
-                OutboxStatus.QUEUED -> "Saved on this phone — waiting to send"
-                OutboxStatus.UPLOADING -> "Sending…"
-                OutboxStatus.REJECTED -> "Not accepted"
-                OutboxStatus.DELIVERED -> "Sent"
+            status = when {
+                elsewhere && row.status != OutboxStatus.REJECTED ->
+                    "Saved on this phone — sent when you log in to ${siteNames[row.siteId] ?: "the site it was taken at"}"
+                else -> when (row.status) {
+                    OutboxStatus.QUEUED -> "Saved on this phone — waiting to send"
+                    OutboxStatus.UPLOADING -> "Sending…"
+                    OutboxStatus.REJECTED -> "Not accepted"
+                    OutboxStatus.DELIVERED -> "Sent"
+                }
             },
-            detail = row.lastError,
+            detail = if (elsewhere && row.status != OutboxStatus.REJECTED) null else row.lastError,
             rejectedCapture = row.captureId.takeIf { row.status == OutboxStatus.REJECTED },
             editableDescription = (row.description ?: "").takeIf { row.status == OutboxStatus.REJECTED && refusedForItsText(row) }
         )

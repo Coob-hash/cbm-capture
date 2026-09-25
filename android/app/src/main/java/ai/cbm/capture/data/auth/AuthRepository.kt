@@ -2,9 +2,10 @@ package ai.cbm.capture.data.auth
 
 import ai.cbm.capture.BuildConfig
 import ai.cbm.capture.data.remote.AppApi
-import ai.cbm.capture.data.remote.NETWORK_MESSAGE
+import ai.cbm.capture.data.remote.UNREADABLE_MESSAGE
 import ai.cbm.capture.data.remote.apiError
 import ai.cbm.capture.data.remote.bearer
+import ai.cbm.capture.data.remote.networkMessage
 import ai.cbm.capture.data.session.Session
 import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.model.DeviceInfo
@@ -14,9 +15,14 @@ import ai.cbm.capture.domain.model.SelectRoleRequest
 import ai.cbm.capture.domain.model.SessionResponse
 import ai.cbm.capture.domain.model.SignUpRequest
 import android.os.Build
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import retrofit2.Response
 import java.io.IOException
+import java.time.DateTimeException
 import java.time.OffsetDateTime
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -55,7 +61,7 @@ class AuthRepository @Inject constructor(
             if (r.isSuccessful) AuthResult.Ok(s.copy(membershipId = membershipId).also(store::save))
             else failed(r)
         } catch (e: IOException) {
-            AuthResult.Failed(NETWORK_MESSAGE)
+            AuthResult.Failed(networkMessage(e))
         }
     }
 
@@ -73,14 +79,23 @@ class AuthRepository @Inject constructor(
                 failed(r)
             }
         } catch (e: IOException) {
-            AuthResult.Failed(NETWORK_MESSAGE)
+            AuthResult.Failed(networkMessage(e))
         }
     }
 
-    suspend fun logout() {
+    /** Where the server is told about a log-out: nothing on screen waits for it. */
+    private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Ends the session on this phone at once, and tells the server in the background. Nothing waits
+     * for the server's answer: a late one used to send the app back to Log in after someone else had
+     * already logged in (third audit 2026-09-25, finding 4). The server revokes the token when the
+     * call arrives; if it never does, the session still ends at its hour.
+     */
+    fun logout() {
         val s = store.session.value
         store.clear()
-        if (s != null) runCatching { api.logout(bearer(s.token)) }
+        if (s != null) background.launch { runCatching { api.logout(bearer(s.token)) } }
     }
 
     private suspend fun call(request: suspend () -> Response<SessionResponse>): AuthResult = try {
@@ -88,7 +103,10 @@ class AuthRepository @Inject constructor(
         val body = r.body()
         if (r.isSuccessful && body != null) AuthResult.Ok(toSession(body).also(store::save)) else failed(r)
     } catch (e: IOException) {
-        AuthResult.Failed(NETWORK_MESSAGE)
+        AuthResult.Failed(networkMessage(e))
+    } catch (e: DateTimeException) {
+        // A session whose expiry is not a date: as unreadable as a body that is not JSON.
+        AuthResult.Failed(UNREADABLE_MESSAGE)
     }
 
     private fun failed(r: Response<*>): AuthResult.Failed {

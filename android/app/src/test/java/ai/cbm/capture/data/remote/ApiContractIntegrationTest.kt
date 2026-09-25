@@ -10,10 +10,8 @@ import ai.cbm.capture.domain.model.LoginRequest
 import ai.cbm.capture.domain.model.PixelPoint
 import ai.cbm.capture.domain.model.SignUpRequest
 import ai.cbm.capture.domain.model.TargetDescriptor
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -40,7 +38,7 @@ class ApiContractIntegrationTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
     private fun api() = Retrofit.Builder().baseUrl(baseUrl.trimEnd('/') + "/").client(OkHttpClient())
-        .addConverterFactory(json.asConverterFactory("application/json".toMediaType())).build().create(AppApi::class.java)
+        .addConverterFactory(json.appConverterFactory()).build().create(AppApi::class.java)
 
     /** A real 960 x 1280 JPEG (a plain grey frame, 5 KB, in test resources). The API decodes what it
      *  accepts - a frame header with no pixels behind it is refused - and Android's unit-test

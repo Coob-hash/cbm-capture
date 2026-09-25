@@ -1,9 +1,9 @@
 package ai.cbm.capture.data.work
 
 import ai.cbm.capture.data.remote.AppApi
-import ai.cbm.capture.data.remote.NETWORK_MESSAGE
 import ai.cbm.capture.data.remote.apiError
 import ai.cbm.capture.data.remote.bearer
+import ai.cbm.capture.data.remote.networkMessage
 import ai.cbm.capture.data.session.SessionStore
 import ai.cbm.capture.domain.model.DecisionRequest
 import ai.cbm.capture.domain.model.DecisionResponse
@@ -120,7 +120,7 @@ class WorkRepository @Inject constructor(
                 else -> WorkResult.Failed(response.apiError(json).message ?: "Something went wrong. Try again in a moment.")
             }
         } catch (e: IOException) {
-            WorkResult.Failed(NETWORK_MESSAGE)
+            WorkResult.Failed(networkMessage(e))
         }
     }
 

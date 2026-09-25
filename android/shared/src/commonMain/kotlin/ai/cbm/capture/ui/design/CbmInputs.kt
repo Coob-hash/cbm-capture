@@ -3,6 +3,7 @@ package ai.cbm.capture.ui.design
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -10,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -33,6 +35,10 @@ fun CbmField(label: String, value: String, onChange: (String) -> Unit, modifier:
             placeholder = { Text(placeholder, color = CbmPalette.Steel300) },
             textStyle = if (mono) LocalTechStyles.current.ticketId else MaterialTheme.typography.bodyLarge,
             visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+            // Masking the characters is not enough: the keyboard must also be told it is a password,
+            // or it treats it as ordinary text - autocorrect, suggestions, learning what is typed
+            // (third audit 2026-09-25, finding 8).
+            keyboardOptions = if (secret) SECRET_KEYBOARD else KeyboardOptions.Default,
             singleLine = true,
             shape = RoundedCornerShape(3.dp),
             colors = OutlinedTextFieldDefaults.colors(
@@ -44,6 +50,8 @@ fun CbmField(label: String, value: String, onChange: (String) -> Unit, modifier:
         )
     }
 }
+
+private val SECRET_KEYBOARD = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)
 
 @Composable
 fun CbmTextArea(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, maxChars: Int = 500, placeholder: String = "") {

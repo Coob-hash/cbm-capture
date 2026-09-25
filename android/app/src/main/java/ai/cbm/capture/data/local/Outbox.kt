@@ -83,20 +83,21 @@ interface OutboxDao {
 
     /**
      * Claim the next due package, marking it `UPLOADING` in the same transaction so two workers
-     * cannot pick up the same row.
+     * cannot pick up the same row. Only a photo of [siteId]: the session sending it is that site's,
+     * and the server refuses a photo of another (third audit 2026-09-25, finding 5).
      */
     @androidx.room.Transaction
-    suspend fun claimNextDue(now: Long, accountId: String): OutboxEntity? {
-        val candidate = nextDue(now, accountId) ?: return null
+    suspend fun claimNextDue(now: Long, accountId: String, siteId: String): OutboxEntity? {
+        val candidate = nextDue(now, accountId, siteId) ?: return null
         setStatus(candidate.captureId, OutboxStatus.UPLOADING, now, candidate.attemptCount + 1)
         return candidate.copy(status = OutboxStatus.UPLOADING, attemptCount = candidate.attemptCount + 1)
     }
 
     @Query(
         "SELECT * FROM outbox WHERE status = 'QUEUED' AND next_attempt_at <= :now AND account_id = :accountId " +
-            "ORDER BY created_at ASC LIMIT 1"
+            "AND building_id = :siteId ORDER BY created_at ASC LIMIT 1"
     )
-    suspend fun nextDue(now: Long, accountId: String): OutboxEntity?
+    suspend fun nextDue(now: Long, accountId: String, siteId: String): OutboxEntity?
 
     @Query(
         "UPDATE outbox SET status = :status, next_attempt_at = :nextAttemptAt, " +

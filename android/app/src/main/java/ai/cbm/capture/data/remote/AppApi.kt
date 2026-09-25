@@ -19,10 +19,16 @@ import ai.cbm.capture.domain.model.SelectRoleRequest
 import ai.cbm.capture.domain.model.SelectRoleResponse
 import ai.cbm.capture.domain.model.SessionResponse
 import ai.cbm.capture.domain.model.SignUpRequest
+import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.ResponseBody
+import retrofit2.Converter
 import retrofit2.Response
+import retrofit2.Retrofit
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Header
@@ -30,6 +36,8 @@ import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.Part
 import retrofit2.http.Path
+import java.io.IOException
+import java.lang.reflect.Type
 
 /** The App API (backend/README.md). The phone talks to nothing else. */
 interface AppApi {
@@ -102,3 +110,44 @@ fun Response<*>.apiError(json: Json): ApiError =
         ?: ApiError(error = "HTTP_${code()}", message = null)
 
 const val NETWORK_MESSAGE = "Can't reach the server. Check your connection and try again."
+const val UNREADABLE_MESSAGE =
+    "The server's answer could not be read. If this Wi-Fi asks you to sign in, do that first, then try again."
+
+/** What a screen says when a call ended without an answer it could use. */
+fun networkMessage(e: IOException): String = if (e is UnreadableResponseException) UNREADABLE_MESSAGE else NETWORK_MESSAGE
+
+/**
+ * A success whose body is not the API's JSON: a Wi-Fi sign-in page, a proxy's error page, a body
+ * cut short. Retrofit decodes it before any caller sees the response, and the decoder's exception
+ * reached no handler: the app closed (third audit 2026-09-25, finding 3). As an [IOException] it is
+ * what every caller already handles as "no usable answer": said on the screen, and retried.
+ */
+class UnreadableResponseException(cause: Throwable) : IOException("The server's answer could not be read", cause)
+
+/** The App API's converter: its JSON, with an unreadable body turned into [UnreadableResponseException]. */
+fun Json.appConverterFactory(): Converter.Factory = ReadableResponses(asConverterFactory("application/json".toMediaType()))
+
+private class ReadableResponses(private val json: Converter.Factory) : Converter.Factory() {
+    override fun responseBodyConverter(type: Type, annotations: Array<out Annotation>, retrofit: Retrofit): Converter<ResponseBody, *>? {
+        val decode = json.responseBodyConverter(type, annotations, retrofit) ?: return null
+        return Converter<ResponseBody, Any?> { body ->
+            try {
+                decode.convert(body)
+            } catch (e: IOException) {
+                throw e
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: RuntimeException) {
+                // kotlinx.serialization's SerializationException (an IllegalArgumentException) and kin.
+                throw UnreadableResponseException(e)
+            }
+        }
+    }
+
+    override fun requestBodyConverter(
+        type: Type,
+        parameterAnnotations: Array<out Annotation>,
+        methodAnnotations: Array<out Annotation>,
+        retrofit: Retrofit
+    ): Converter<*, RequestBody>? = json.requestBodyConverter(type, parameterAnnotations, methodAnnotations, retrofit)
+}

@@ -21,6 +21,8 @@ sealed interface UploadOutcome {
     data class TransientFailure(val reason: String) : UploadOutcome
     /** The session ended. Keep the photo queued; it goes out after the same person logs in again. */
     data object NeedsLogin : UploadOutcome
+    /** The photo belongs to another site than this session's. Keep it queued for a session at its own site. */
+    data class OtherSite(val reason: String) : UploadOutcome
 }
 
 /**
@@ -49,21 +51,28 @@ class CaptureUploader @Inject constructor(
                     401 -> UploadOutcome.NeedsLogin
                     409 -> UploadOutcome.PermanentFailure(r.apiError(json).message ?: "This photo was already sent differently.")
                     413 -> UploadOutcome.PermanentFailure("The photo is larger than the server accepts.")
-                    400, 422 -> r.apiError(json).let { UploadOutcome.PermanentFailure(rejection(it.error, it.message), it.error) }
+                    400, 422 -> r.apiError(json).let {
+                        // Not the photo's fault: sent under another site's session, it is kept for its own.
+                        if (it.error == "SITE_MISMATCH") UploadOutcome.OtherSite(OTHER_SITE)
+                        else UploadOutcome.PermanentFailure(rejection(it.error, it.message), it.error)
+                    }
                     else -> UploadOutcome.TransientFailure("The server is unavailable (HTTP ${r.code()}).")
                 }
             } catch (e: IOException) {
-                // Offline, timed out, or dropped mid-body: all worth retrying.
-                UploadOutcome.TransientFailure(NETWORK_MESSAGE)
+                // Offline, timed out, dropped mid-body, or an answer that was not the API's: all worth retrying.
+                UploadOutcome.TransientFailure(networkMessage(e))
             }
         }
 
     private fun rejection(code: String, message: String?): String = when (code) {
         "FRAME_MISMATCH", "INVALID_CAPTURE" -> "The photo and its camera data did not match. Please take it again."
         "CHECKSUM_MISMATCH" -> "The photo was damaged on the way. Please take it again."
-        "SITE_MISMATCH" -> "This photo belongs to another site than your account."
         "NOT_A_JPEG" -> "The photo could not be read. Please take it again."
         "DESCRIPTION_TOO_LONG" -> "The description is longer than 500 characters. Edit it and send it again."
         else -> message ?: "The server did not accept this photo ($code)."
+    }
+
+    companion object {
+        const val OTHER_SITE = "Taken at another site. It is sent when you log in to that site."
     }
 }

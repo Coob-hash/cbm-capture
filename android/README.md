@@ -55,6 +55,33 @@ about a minute, which is what the screen says.
   the template opens in the app, with the file chooser wired so the AFTER photo can be attached.
   The page still builds and posts the PDF itself, so nobody uploads a file anywhere.
 
+## Closed on 25 Sep (1.0.4, versionCode 5) — the third audit
+
+The third audit, of 1.0.3 (`output/cbm-audit-2026-09-25-third/CBM_THIRD_AUDIT.md`), found eight
+defects. The app's four are fixed here; the server's four are in `backend/`.
+
+- **An answer that is not the API's no longer closes the app (3).** A 200 with an HTML body - a
+  Wi-Fi sign-in page, a gateway page - failed to decode inside Retrofit, and the exception reached no
+  handler: the app closed at Log in. The converter (`Json.appConverterFactory()` in
+  `data/remote/AppApi.kt`) now turns an unreadable body into an `IOException`, which every caller
+  already handles. The screen says *The server's answer could not be read. If this Wi-Fi asks you
+  to sign in, do that first, then try again.*, the form can be sent again, and the uploader retries.
+- **A late log-out answer no longer undoes the next login (4).** Log out waited for the server's
+  answer, then reset the form and went to Log in. An answer 30 seconds late did that over the next
+  person's session. The session now ends on the phone at once and the server is told in the
+  background (`AuthRepository.logout`). Nothing on screen waits for the server's answer.
+- **A photo taken at one site waits for that site (5).** The queue was read by account alone. After
+  logging in at another site, a waiting photo went out under that session, was refused
+  (`SITE_MISMATCH`) and was marked *Not accepted*. It is now sent only under a reporter session of
+  its own site (`OutboxDao.nextDue`, `CaptureRepository.drain`). Meanwhile it reads *Saved on this
+  phone — sent when you log in to <site>*. A `SITE_MISMATCH` from the server keeps it queued too.
+- **The password field tells the keyboard it is a password (8).** It was masked on screen, but the
+  keyboard was told it was ordinary text with autocorrect (`inputType 0x8001`). It is now
+  `KeyboardType.Password` without autocorrect (`0x81`).
+
+All four were re-run on the emulator with the audit's own steps and fault proxy: no crash, the
+screen kept, the photo sent at its own site, `inputType=0x81`. Tests: 6 more (60).
+
 ## Closed on 24 Sep (1.0.3, versionCode 4) — the second audit
 
 The second audit, of 1.0.2 (`output/cbm-audit-2026-09-24-second/CBM_SECOND_AUDIT.md`), found six

@@ -1,9 +1,7 @@
 package ai.cbm.capture.data.remote
 
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -28,7 +26,7 @@ class CaptureUploaderTest {
     fun setUp() {
         server.start()
         val api = Retrofit.Builder().baseUrl(server.url("/")).client(OkHttpClient())
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType())).build()
+            .addConverterFactory(json.appConverterFactory()).build()
             .create(AppApi::class.java)
         uploader = CaptureUploader(api, json)
         image = File.createTempFile("capture", ".jpg").apply { writeBytes(byteArrayOf(-1, -40, -1, -39)) }
@@ -90,6 +88,23 @@ class CaptureUploaderTest {
             ),
             upload()
         )
+    }
+
+    @Test
+    fun `a photo sent under another site's session is kept for its own site`() = runTest {
+        // Third audit 2026-09-25, finding 5: this was a permanent refusal, and the photo was dropped
+        // from the queue.
+        respond(422, """{"error":"SITE_MISMATCH","message":"This capture belongs to another site than your session."}""")
+        assertEquals(UploadOutcome.OtherSite(CaptureUploader.OTHER_SITE), upload())
+    }
+
+    @Test
+    fun `an answer that is not the API's is retried, not a crash`() = runTest {
+        // Third audit 2026-09-25, finding 3: a Wi-Fi sign-in page answering 200.
+        respond(200, "<html><body>Sign in to this Wi-Fi</body></html>")
+        assertEquals(UploadOutcome.TransientFailure(UNREADABLE_MESSAGE), upload())
+        respond(202, """{"capture_id":"cid-1"}""")
+        assertTrue("a body without its fields", upload() is UploadOutcome.TransientFailure)
     }
 
     @Test

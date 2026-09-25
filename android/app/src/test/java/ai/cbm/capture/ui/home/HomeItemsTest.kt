@@ -16,9 +16,9 @@ class HomeItemsTest {
 
     private fun local(
         capture: String, report: String, status: OutboxStatus, error: String? = null,
-        code: String? = null, description: String? = "Door handle"
+        code: String? = null, description: String? = "Door handle", site: String = "SITE-A"
     ) = ReportItem(
-        captureId = capture, reportId = report, createdAt = 0, summary = description ?: "Untitled report", status = status,
+        captureId = capture, reportId = report, siteId = site, createdAt = 0, summary = description ?: "Untitled report", status = status,
         attemptCount = 0, lastError = error, serverStatus = code, description = description, thumbnailPath = null,
         intrinsicsSource = IntrinsicsSource.ARCORE, intrinsicsTrusted = true)
 
@@ -50,6 +50,26 @@ class HomeItemsTest {
         assertEquals("y".repeat(600), items.getValue("local-c2").editableDescription)
         assertNull(items.getValue("local-c3").editableDescription)
         assertNull(items.getValue("local-c4").editableDescription)
+    }
+
+    @Test
+    fun `a photo taken at another site waits for that site, and says so`() {
+        // Third audit 2026-09-25, finding 5: it was sent under this site's session and refused.
+        val names = mapOf("SITE-A" to "Office A", "SITE-B" to "Office B")
+        val waiting = local("c1", "r1", OutboxStatus.QUEUED, error = "Waiting for you to log in.", site = "SITE-A")
+        val sentThere = local("c2", "r2", OutboxStatus.DELIVERED, site = "SITE-A")
+        val refusedThere = local("c3", "r3", OutboxStatus.REJECTED, error = "did not match", site = "SITE-A")
+        val mine = local("c4", "r4", OutboxStatus.QUEUED, site = "SITE-B")
+        val items = buildHomeItems(listOf(waiting, sentThere, refusedThere, mine), emptyList(), siteId = "SITE-B", siteNames = names)
+            .associateBy { it.key }
+        assertEquals(setOf("local-c1", "local-c3", "local-c4"), items.keys)
+        assertEquals("Saved on this phone — sent when you log in to Office A", items.getValue("local-c1").status)
+        assertNull(items.getValue("local-c1").rejectedCapture)
+        assertEquals("Not accepted", items.getValue("local-c3").status)
+        assertEquals("Saved on this phone — waiting to send", items.getValue("local-c4").status)
+        // At its own site it is an ordinary waiting photo.
+        assertEquals("Saved on this phone — waiting to send",
+            buildHomeItems(listOf(waiting), emptyList(), siteId = "SITE-A", siteNames = names).single().status)
     }
 
     @Test

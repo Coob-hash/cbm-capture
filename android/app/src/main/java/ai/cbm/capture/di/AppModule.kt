@@ -6,16 +6,15 @@ import ai.cbm.capture.data.local.CbmDatabase
 import ai.cbm.capture.data.local.OutboxDao
 import ai.cbm.capture.BuildConfig
 import ai.cbm.capture.data.remote.AppApi
+import ai.cbm.capture.data.remote.appConverterFactory
 import android.content.Context
 import androidx.room.Room
-import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import java.util.concurrent.TimeUnit
@@ -60,7 +59,8 @@ object AppModule {
         // The App API; set per build in android/local.properties (cbm.apiBaseUrl).
         .baseUrl(BuildConfig.API_BASE_URL)
         .client(client)
-        .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+        // An unreadable 2xx body becomes an IOException the screens handle, not a crash.
+        .addConverterFactory(json.appConverterFactory())
         .build()
 
     @Provides

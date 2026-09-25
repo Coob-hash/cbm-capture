@@ -27,10 +27,15 @@ import kotlin.math.pow
 /** The title of a report sent without a description. */
 private const val UNTITLED = "Untitled report"
 
+/** The membership role that takes photos (the server's USER). */
+private const val REPORTER_ROLE = "USER"
+
 /** A snapshot of one outbox row, shaped for the UI. */
 data class ReportItem(
     val captureId: String,
     val reportId: String,
+    /** The site it was taken at; it is sent only under a session of that site. */
+    val siteId: String,
     val createdAt: Long,
     val summary: String,
     val status: OutboxStatus,
@@ -109,9 +114,14 @@ class CaptureRepository @Inject constructor(
      * thousands. Returns false when a transient failure means the caller should back off.
      */
     suspend fun drain(session: Session): Boolean {
+        // A photo is sent under a reporter session of the site it was taken at, and only there. The
+        // queue used to be read by account alone: after a switch to another site, a photo waiting
+        // from the first went out under the second's session, was refused (SITE_MISMATCH) and marked
+        // not accepted. Now it waits for a session at its own site (third audit 2026-09-25, finding 5).
+        val site = session.membership?.takeIf { it.role == REPORTER_ROLE && it.isActive }?.siteId ?: return true
         while (true) {
             if (!session.isValid()) return true
-            val claimed = dao.claimNextDue(System.currentTimeMillis(), session.accountId) ?: return true
+            val claimed = dao.claimNextDue(System.currentTimeMillis(), session.accountId, site) ?: return true
 
             val outcome = uploader.upload(
                 token = session.token,
@@ -130,6 +140,13 @@ class CaptureRepository @Inject constructor(
 
                 is UploadOutcome.PermanentFailure ->
                     dao.markRejected(claimed.captureId, outcome.reason, outcome.code)
+
+                // Refused as another site's all the same: kept, and not tried again straight away.
+                is UploadOutcome.OtherSite -> dao.markRetryable(
+                    claimed.captureId,
+                    outcome.reason,
+                    System.currentTimeMillis() + backoffMillis(claimed.attemptCount)
+                )
 
                 // The session ended while draining: back to the queue, sent after the next login.
                 UploadOutcome.NeedsLogin -> {
@@ -206,6 +223,7 @@ class CaptureRepository @Inject constructor(
     private fun toReportItem(entity: OutboxEntity) = ReportItem(
         captureId = entity.captureId,
         reportId = entity.reportId,
+        siteId = entity.buildingId,
         createdAt = entity.createdAt,
         summary = entity.summary,
         status = entity.status,
