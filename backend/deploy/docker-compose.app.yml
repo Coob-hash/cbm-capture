@@ -16,6 +16,10 @@ services:
       CBM_APP_TRUST_PROXY: ${CBM_APP_TRUST_PROXY:-1}
       # Where n8n serves the technician report template; the app hands the technician a link to it.
       CBM_APP_PORTAL_BASE_URL: ${CBM_APP_PORTAL_BASE_URL:-}
+      # The building assistant: WF3's app entry, over the Docker network, and the key it asks for
+      # (the same value as the 'CBM App Assistant Key' credential in n8n). Empty: not set up.
+      CBM_APP_ASSISTANT_URL: ${CBM_APP_ASSISTANT_URL:-}
+      CBM_APP_ASSISTANT_KEY: ${CBM_APP_ASSISTANT_KEY:-}
     volumes:
       - captures:/data/captures
     ports:

@@ -74,6 +74,20 @@ foreach ($key in $optional.Keys) {
         Add-Content -LiteralPath $envPath -Value @($optional[$key], "$key=")
     }
 }
+# The building assistant (WF3's app entry): its address on the Docker network, and a key made here
+# once. Install-Wf3AppChat.ps1 gives n8n the same key; until it has run, questions answer 503.
+if (-not ($existing | Where-Object { $_ -match '^CBM_APP_ASSISTANT_URL=' })) {
+    Add-Content -LiteralPath $envPath -Value @(
+        "# WF3's app entry (backend\n8n\wf3_app_chat.py), reached over the Docker network."
+        'CBM_APP_ASSISTANT_URL=http://n8n:5678/webhook/cbm-app-fm-chat')
+}
+if (-not ($existing | Where-Object { $_ -match '^CBM_APP_ASSISTANT_KEY=' })) {
+    $bytes = [byte[]]::new(32)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    Add-Content -LiteralPath $envPath -Value @(
+        "# Sent to WF3's app entry; n8n holds the same value as the 'CBM App Assistant Key' credential."
+        "CBM_APP_ASSISTANT_KEY=$([Convert]::ToHexString($bytes).ToLowerInvariant())")
+}
 $passwordLine = Get-Content -LiteralPath $envPath | Where-Object { $_ -match '^CBM_APP_API_DB_PASSWORD=[0-9a-f]{64}$' } | Select-Object -First 1
 if (-not $passwordLine) { throw "$envPath has no valid CBM_APP_API_DB_PASSWORD." }
 $password = $passwordLine.Split('=', 2)[1]

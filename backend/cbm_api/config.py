@@ -18,6 +18,13 @@ class Settings:
     # Where the workflows' technician report template is served (n8n webhooks). The app opens
     # <portal_base_url>/cbm-technician-report?ticket=..&token=.. in the phone's browser.
     portal_base_url: str
+    # The FM's questions go to WF3's agent through its app entry: an n8n webhook reached over the
+    # Docker network, which answers only requests carrying assistant_key. Both empty: not set up.
+    assistant_url: str
+    assistant_key: str
+    # The agent may call several tools before it answers; the phone waits longer than this.
+    assistant_timeout_seconds: int
+    assistant_questions_per_minute: int
 
 
 def load() -> Settings:
@@ -35,4 +42,8 @@ def load() -> Settings:
         max_capture_bytes=int(os.environ.get("CBM_APP_MAX_CAPTURE_BYTES", str(5 * 1024 * 1024))),
         capture_dir=os.environ.get("CBM_APP_CAPTURE_DIR", "/data/captures"),
         portal_base_url=os.environ.get("CBM_APP_PORTAL_BASE_URL", "").rstrip("/"),
+        assistant_url=os.environ.get("CBM_APP_ASSISTANT_URL", "").strip(),
+        assistant_key=os.environ.get("CBM_APP_ASSISTANT_KEY", "").strip(),
+        assistant_timeout_seconds=int(os.environ.get("CBM_APP_ASSISTANT_TIMEOUT_SECONDS", "120")),
+        assistant_questions_per_minute=int(os.environ.get("CBM_APP_ASSISTANT_QUESTIONS_PER_MINUTE", "6")),
     )

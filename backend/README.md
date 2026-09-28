@@ -18,9 +18,9 @@ run on top of the same PostgreSQL database (schema `public`) and never receive c
 | `migrations/004_technician_reports.sql` | The technician's report, written in the app: the template's fields and an optional AFTER photo. WF2 renders the document from them. |
 | `migrations/003_decisions.sql` | What the FM and the technician decide from the phone. No second decision path: it authenticates, checks the site, and calls the workflows' own guarded functions. |
 | `cbm_api/` | FastAPI service: HTTP, Google token verification, rate and size limits. |
-| `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`, `test_api_decisions.py`), `run-tests.sh`. |
-| `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, and `Approve-CbmFm.ps1` (list, approve or reject pending requests: FMs, and technicians whose email is already on the dispatch list). |
-| `n8n/` | The WF1 app branch: patch script and tests. |
+| `tests/` | SQL suite (`test_app_schema.sql`), API suites (`test_api_auth.py`, `test_api_captures.py`, `test_api_decisions.py`, `test_api_assistant.py`), `run-tests.sh`. |
+| `deploy/` | `Install-CbmApp.ps1`, `docker-compose.app.yml`, `Install-Wf3AppChat.ps1` (WF3's app entry and its key), and `Approve-CbmFm.ps1` (list, approve or reject pending requests: FMs, and technicians whose email is already on the dispatch list). |
+| `n8n/` | The WF1 and WF2 app branches and WF3's app entry: patch scripts and tests. |
 
 ## Where the rules live
 
@@ -66,6 +66,7 @@ for).
 | GET | `/v1/reports` | Bearer (reporter) | Own reports with a plain-language status code |
 | GET | `/v1/fm/queue` | Bearer (FM) | The two queues that wait for a decision — interventions to authorize, completions to approve — plus the site's counts |
 | POST | `/v1/fm/decisions` | Bearer (FM) | `approve_intervention` · `reject_intervention` · `approve_completion` · `request_rework`. A rejection or rework needs a reason. `409 BLOCKED` when the ticket moved on |
+| POST | `/v1/fm/assistant` | Bearer (FM) | `{"message"}` (1–1500 characters) → `{"answer"}` from the building assistant, WF3's agent (see below). Six questions a minute per account (`429`). `503 ASSISTANT_UNAVAILABLE` when the agent did not answer usably within two minutes; `503 ASSISTANT_NOT_CONFIGURED` until it is set up |
 | GET | `/v1/photos/{capture_id}` | Bearer (FM, or the technician on that job) | The reporter's photo behind a card |
 | GET | `/v1/technician/jobs` | Bearer (technician) | Offers to answer, jobs in hand, work completed, own skills. A job whose report was sent this approval cycle is `report_state = PROCESSING`, `report_needed = false`, until WF2 moves the ticket on |
 | POST | `/v1/technician/offers` | Bearer (technician) | Accept or decline an offer. `409 OFFER_GONE` when it expired or was answered |
@@ -80,6 +81,31 @@ WF1. How WF1 consumes app photos: [`n8n/README.md`](n8n/README.md).
 
 Every request carries a `device` (`id` = the app's install UUID, `platform`, optional model and
 versions). The first login of an account on a device returns `new_device: true`.
+
+## The building assistant
+
+The FM's home has a chat with WF3's agent, the one that answers in n8n's own chat. That chat needs
+an n8n login, so the API asks through a second entry into WF3 instead: an n8n webhook,
+`POST http://n8n:5678/webhook/cbm-app-fm-chat`, which answers only a request carrying the header
+`X-CBM-App-Key`. From there the agent, its tools, its guarded action tools and its memory are the
+chat's own ([`n8n/README.md`](n8n/README.md#wf3-the-building-assistant-in-the-app)).
+
+1. `cbm_app.authenticate(token, {FM, ADMIN})` must return the session: an approved FM or ADMIN of
+   an active site, and nothing reaches n8n otherwise.
+2. The question goes out with the session id `app-fm-<account id>`: one conversation per account,
+   kept apart from the browser chat's.
+3. The answer is WF3's `Chat Response`, `{"output": …}`; anything else, a timeout included, is
+   `503 ASSISTANT_UNAVAILABLE`. Its message asks the FM to check a ticket before asking again,
+   because the agent may have acted before the answer was lost; the guarded actions refuse a
+   second decision on the same approval cycle in any case.
+
+Settings in `app.env`: `CBM_APP_ASSISTANT_URL`, `CBM_APP_ASSISTANT_KEY` (both written by
+`Install-CbmApp.ps1`; the key once, at random), and optionally
+`CBM_APP_ASSISTANT_TIMEOUT_SECONDS` (120) and `CBM_APP_ASSISTANT_QUESTIONS_PER_MINUTE` (6).
+`deploy/Install-Wf3AppChat.ps1` gives n8n the same key and WF3 its entry.
+
+**Known limit.** The agent reads every ticket in the workflows' database, as in n8n's chat. With one
+site that is that site; before a second site shares the deployment, its tools need a site filter.
 
 ## Tests
 

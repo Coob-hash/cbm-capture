@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import captures, config, google_id
+from . import assistant, captures, config, google_id
 from .db import Database
 from .errors import check, fail
 
@@ -109,6 +109,19 @@ class Decision(Strict):
     approval_id: UUID
     expected_updated_at: str = Field(max_length=64)
     request_id: str = Field(max_length=80, pattern=r"^[A-Za-z0-9_:.-]+$")
+
+
+class Question(Strict):
+    """One question to the building assistant. 1500 characters is as much as WF3 reads of one."""
+    message: str = Field(min_length=1, max_length=1500)
+
+    @field_validator("message")
+    @classmethod
+    def _something_asked(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("empty")
+        return value
 
 
 class OfferResponse(Strict):
@@ -368,6 +381,34 @@ def fm_decide(body: Decision, token: Annotated[str, Depends(bearer)]):
             fail("BLOCKED", message=result.get("reason") or None)
         fail(result.get("status") or "INTERNAL")
     return {k: result[k] for k in ("outcome", "ticket_id", "ticket_status", "settling", "card")}
+
+
+# Per account, not per address: an answer costs model calls, and one FM's burst must not become a bill.
+assistant_limiter = _RateLimiter(settings.assistant_questions_per_minute)
+
+
+@app.post("/v1/fm/assistant")
+def fm_assistant(body: Question, token: Annotated[str, Depends(bearer)]):
+    """A question to the building assistant, answered in plain language.
+
+    The assistant is WF3's agent, the one in n8n's own chat: it reads the whole ticket history, and
+    it carries out an explicit decision through the same guarded actions as the email link and the
+    dashboard. One conversation per account; it remembers the recent questions.
+    """
+    if not (settings.assistant_url and settings.assistant_key):
+        fail("ASSISTANT_NOT_CONFIGURED")
+    who = db.call("authenticate", token, ["FM", "ADMIN"])
+    if who is None:
+        fail("UNAUTHENTICATED")
+    if not assistant_limiter.allow(who["user_id"]):
+        fail("RATE_LIMITED", http=429, message="That is a lot of questions at once. Wait a minute.",
+             headers={"Retry-After": "60"})
+    try:
+        answer = assistant.ask(settings.assistant_url, settings.assistant_key, f"app-fm-{who['user_id']}",
+                               body.message, settings.assistant_timeout_seconds)
+    except assistant.AssistantUnavailable:
+        fail("ASSISTANT_UNAVAILABLE")
+    return {"answer": answer}
 
 
 @app.get("/v1/photos/{capture_id}")

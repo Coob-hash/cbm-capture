@@ -125,3 +125,34 @@ every other change made since:
 of this version return. Install the backend first (`deploy/Install-CbmApp.ps1`, which applies the
 migrations), then import the workflow. Importing it before the migrations would stop every app
 report at `App Report Claimed?`.
+
+
+## WF3: the building assistant in the app
+
+    python wf3_app_chat.py <wf3-export.json> <out.json>
+    node test_wf3_app_chat.mjs <wf3-export.json> <out.json>
+
+WF3's chat (`FM Chat`) is n8n's hosted chat and needs an n8n login. The app's facility managers ask
+the same agent through a second entry that joins at the node the chat branch reads, `FM Chat
+Context`:
+
+```
+FM Chat (n8n's chat, n8n login) ─────────────────────────────┐
+App Chat (webhook, X-CBM-App-Key) ─► App Chat Turn ──────────┤
+                                                              ▼
+FM Chat Context ─► Question Asked? ─► FM Dashboard Agent ─► Log FM Question ─► Chat Response
+```
+
+- **`App Chat`** — `POST /webhook/cbm-app-fm-chat`, header auth with the **CBM App Assistant Key**
+  credential. It answers with its last node: `Chat Response`, `{"output": …}`, or `Empty Question
+  Reply`.
+- **`App Chat Turn`** — turns the App API's `{question, sessionId}` into the `{chatInput, sessionId}`
+  that `FM Chat Context` reads from n8n's chat, and refuses any session id that is not
+  `app-fm-<account uuid>`: an app request never continues a conversation begun in n8n's chat.
+- Nothing else changes. No node reads `$('FM Chat')` by name (the script checks this), so every
+  tool, the action tools (actor `FM_CHAT`, session `app-fm-…`), the 50-turn memory and the question
+  log work for both entries.
+
+`deploy/Install-Wf3AppChat.ps1` exports the running WF3, applies and checks the entry, imports the
+credential from `CBM_APP_ASSISTANT_KEY` in `app.env`, and imports WF3 as its draft. Publish WF3 in
+the n8n editor to apply it, or run the script with `-PublishAndRestart`.

@@ -18,6 +18,7 @@ _HTTP = {
     "LOCKED": 429,
     "DISABLED": 403, "FORBIDDEN": 403,
     "NO_ACCOUNT": 404, "NOT_FOUND": 404,
+    "ASSISTANT_NOT_CONFIGURED": 503, "ASSISTANT_UNAVAILABLE": 503,
 }
 
 _MESSAGES = {
@@ -46,6 +47,11 @@ _MESSAGES = {
     "DESCRIPTION_TOO_LONG": "The description is longer than 500 characters. Shorten it and send it again.",
     "REPORT_ALREADY_SENT": "The report for this job has already been sent, so these answers were not saved. "
                            "If something needs changing, the facility manager can send the job back to you.",
+    "ASSISTANT_NOT_CONFIGURED": "The building assistant is not set up on this server yet.",
+    # The agent may have acted before the answer was lost: a decision is guarded against being
+    # taken twice, but the FM should look before asking for it again.
+    "ASSISTANT_UNAVAILABLE": "The assistant did not answer. If you asked it to act on a ticket, check the "
+                             "ticket before asking again.",
 }
 
 

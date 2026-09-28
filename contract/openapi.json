@@ -502,6 +502,61 @@
         }
       }
     },
+    "/v1/fm/assistant": {
+      "post": {
+        "summary": "Fm Assistant",
+        "description": "A question to the building assistant, answered in plain language.\n\nThe assistant is WF3's agent, the one in n8n's own chat: it reads the whole ticket history, and\nit carries out an explicit decision through the same guarded actions as the email link and the\ndashboard. One conversation per account; it remembers the recent questions.",
+        "operationId": "fm_assistant_v1_fm_assistant_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Question"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/photos/{capture_id}": {
       "get": {
         "summary": "Photo",
@@ -712,6 +767,122 @@
         }
       }
     },
+    "/v1/technician/jobs/{ticket_id}/report": {
+      "post": {
+        "summary": "Submit Report",
+        "description": "The work report, written in the app: the template's fields and an optional AFTER photo.\n\nThe PDF is not made here. WF2 renders it with the template's own renderer, so a report written\nin the app and one written in the browser are the same document, and claims it through the\nworkflows' existing submission function.",
+        "operationId": "submit_report_v1_technician_jobs__ticket_id__report_post",
+        "parameters": [
+          {
+            "name": "ticket_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ticket Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_submit_report_v1_technician_jobs__ticket_id__report_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Report State",
+        "description": "Whether this job's report has already been written, so the form is not filled twice.",
+        "operationId": "report_state_v1_technician_jobs__ticket_id__report_get",
+        "parameters": [
+          {
+            "name": "ticket_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ticket Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/technician/jobs/{ticket_id}/report-link": {
       "get": {
         "summary": "Technician Report Link",
@@ -788,6 +959,32 @@
           "image"
         ],
         "title": "Body_submit_capture_v1_captures_post"
+      },
+      "Body_submit_report_v1_technician_jobs__ticket_id__report_post": {
+        "properties": {
+          "report": {
+            "type": "string",
+            "maxLength": 32768,
+            "title": "Report"
+          },
+          "photo": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Photo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "report"
+        ],
+        "title": "Body_submit_report_v1_technician_jobs__ticket_id__report_post"
       },
       "Decision": {
         "properties": {
@@ -1030,6 +1227,23 @@
           "decision"
         ],
         "title": "OfferResponse"
+      },
+      "Question": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "maxLength": 1500,
+            "minLength": 1,
+            "title": "Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "Question",
+        "description": "One question to the building assistant. 1500 characters is as much as WF3 reads of one."
       },
       "SelectRole": {
         "properties": {
