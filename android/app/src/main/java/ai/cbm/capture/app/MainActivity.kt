@@ -7,12 +7,14 @@ import ai.cbm.capture.ui.auth.AuthViewModel
 import ai.cbm.capture.ui.auth.ChooseRoleScreen
 import ai.cbm.capture.ui.auth.JoinSiteScreen
 import ai.cbm.capture.ui.auth.LoginScreen
+import ai.cbm.capture.ui.auth.ScanSiteScreen
 import ai.cbm.capture.ui.auth.SignUpScreen
 import ai.cbm.capture.ui.auth.WaitingScreen
 import ai.cbm.capture.ui.auth.roleLabel
 import ai.cbm.capture.ui.capture.CaptureScreen
 import ai.cbm.capture.ui.capture.CaptureViewModel
 import ai.cbm.capture.ui.fm.FmHomeScreen
+import ai.cbm.capture.ui.fm.FmNotificationsScreen
 import ai.cbm.capture.ui.fm.FmViewModel
 import ai.cbm.capture.ui.home.ReporterHomeViewModel
 import ai.cbm.capture.ui.reports.ReporterHomeScreen
@@ -115,9 +117,22 @@ class MainActivity : ComponentActivity() {
                 val startDestination = remember { startRoute() }
                 NavHost(navController = nav, startDestination = startDestination) {
                     composable(Route.JOIN) {
-                        JoinSiteScreen(form, auth::onCode,
+                        JoinSiteScreen(form,
+                            onScan = { auth.clearError(); nav.navigate(Route.SCAN) },
+                            onCodeChange = auth::onCode,
                             onContinue = { if (auth.joinSite()) { auth.startSignUp(); nav.navigate(Route.SIGN_UP) } },
                             onHaveAccount = { auth.clearError(); nav.navigate(Route.LOGIN) })
+                    }
+                    composable(Route.SCAN) {
+                        // The scanner leaves the back stack: Back from sign-up returns to Join.
+                        ScanSiteScreen(
+                            onCode = { code ->
+                                if (auth.joinSite(code)) {
+                                    auth.startSignUp()
+                                    nav.navigate(Route.SIGN_UP) { popUpTo(Route.JOIN) }
+                                }
+                            },
+                            onTypeInstead = { nav.popBackStack() })
                     }
                     composable(Route.LOGIN) {
                         LoginScreen(form, auth::onEmail, auth::onPassword,
@@ -180,6 +195,22 @@ class MainActivity : ComponentActivity() {
                             state = state,
                             onRefresh = vm::refresh,
                             onDecide = vm::decide,
+                            onNotifications = { vm.refresh(); nav.navigate(Route.NOTIFICATIONS) },
+                            onChatDraft = vm::onChatDraft,
+                            onAsk = vm::ask,
+                            onProfile = { nav.navigate(Route.SETTINGS) }
+                        )
+                    }
+                    composable(Route.NOTIFICATIONS) { entry ->
+                        // The home's own model: the same queue the home shows, not a second copy.
+                        val home = remember(entry) { runCatching { nav.getBackStackEntry(Route.FM) }.getOrNull() }
+                        val vm: FmViewModel = hiltViewModel(home ?: entry)
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        FmNotificationsScreen(
+                            state = state,
+                            onBack = { nav.popBackStack() },
+                            onOpen = { nav.popBackStack() },
+                            onRefresh = vm::refresh,
                             onProfile = { nav.navigate(Route.SETTINGS) }
                         )
                     }
@@ -296,6 +327,7 @@ class MainActivity : ComponentActivity() {
 
     private object Route {
         const val JOIN = "join"
+        const val SCAN = "scan"
         const val LOGIN = "login"
         const val SIGN_UP = "signup"
         const val CHOOSE_ROLE = "role"
@@ -303,6 +335,7 @@ class MainActivity : ComponentActivity() {
         const val HOME = "home"
         const val TECHNICIAN = "technician"
         const val FM = "fm"
+        const val NOTIFICATIONS = "notifications"
         const val CAPTURE = "capture?${CaptureViewModel.REPORT_ID_ARG}={${CaptureViewModel.REPORT_ID_ARG}}"
         const val SETTINGS = "settings"
         const val REPORT = "report/{ticket}"
@@ -312,8 +345,8 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         val PROTECTED = setOf(
-            Route.CHOOSE_ROLE, Route.WAITING, Route.HOME, Route.TECHNICIAN, Route.FM, Route.CAPTURE,
-            Route.REPORT, Route.SETTINGS
+            Route.CHOOSE_ROLE, Route.WAITING, Route.HOME, Route.TECHNICIAN, Route.FM, Route.NOTIFICATIONS,
+            Route.CAPTURE, Route.REPORT, Route.SETTINGS
         )
     }
 }

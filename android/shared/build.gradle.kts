@@ -27,6 +27,8 @@ kotlin {
             implementation(compose.runtime)
             implementation(compose.foundation)
             implementation(compose.material3)
+            // The eye on password fields; the app ships the same icon set already.
+            implementation(compose.materialIconsExtended)
             implementation(compose.ui)
             api(libs.kotlinx.serialization.json)
             api(libs.kotlinx.datetime)   // the session countdown and the offer clock

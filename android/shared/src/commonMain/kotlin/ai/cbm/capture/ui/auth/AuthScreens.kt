@@ -70,25 +70,37 @@ private fun AuthScaffold(title: String, subtitle: String?, content: @Composable 
     }
 }
 
-/** First launch without a site: the code comes from the site's QR poster, or is typed from it. */
+/**
+ * First launch without a site: the code comes from the site's QR poster, or is typed from it. The
+ * poster is scanned here, in the app: a phone's own camera app may show its join link as plain
+ * text and never open it.
+ */
 @Composable
 fun JoinSiteScreen(
     state: AuthFormState,
+    onScan: () -> Unit,
     onCodeChange: (String) -> Unit,
     onContinue: () -> Unit,
     onHaveAccount: () -> Unit
 ) = AuthScaffold(
     title = "Join your site",
-    subtitle = "Scan the QR code on the site's poster with your phone's camera, or type the code printed under it."
+    subtitle = "Scan the QR code on the site's poster, or type the code printed under it."
 ) {
+    CbmPrimaryButton(
+        text = "Scan the QR code",
+        onClick = onScan,
+        modifier = Modifier.fillMaxWidth(),
+        enabled = !state.busy,
+        tall = true
+    )
+    SectionHeader("Or type the code")
     CbmField("Site code", state.codeInput, onCodeChange, placeholder = "the code under the QR", mono = true)
     state.error?.let { CbmInlineAlert(AlertKind.CRITICAL, it) }
     CbmPrimaryButton(
         text = "Continue",
         onClick = onContinue,
         modifier = Modifier.fillMaxWidth(),
-        enabled = state.codeInput.isNotBlank() && !state.busy,
-        tall = true
+        enabled = state.codeInput.isNotBlank() && !state.busy
     )
     CbmOutlineButton("I already have an account", onHaveAccount, Modifier.fillMaxWidth())
 }

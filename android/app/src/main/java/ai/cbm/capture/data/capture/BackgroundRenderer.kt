@@ -31,8 +31,10 @@ class BackgroundRenderer {
 
     private lateinit var quadCoords: FloatBuffer
     private lateinit var quadTexCoords: FloatBuffer
+    private var texCoordsValid = false
 
     fun createOnGlThread() {
+        texCoordsValid = false
         val textures = IntArray(1)
         GLES20.glGenTextures(1, textures, 0)
         textureId = textures[0]
@@ -55,15 +57,20 @@ class BackgroundRenderer {
     fun draw(frame: Frame) {
         // Recompute texture coordinates whenever the display geometry changed; ARCore tells us
         // when, so this is not done on every frame for no reason.
-        if (frame.hasDisplayGeometryChanged()) {
+        if (frame.hasDisplayGeometryChanged()) texCoordsValid = false
+        if (frame.timestamp == 0L) return // No frame yet; drawing would flash a garbage texture.
+        if (!texCoordsValid) {
+            // Only from a frame with a camera image: before one, the mapping cannot be known.
             frame.transformCoordinates2d(
                 Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
                 quadCoords,
                 Coordinates2d.TEXTURE_NORMALIZED,
                 quadTexCoords
             )
+            texCoordsValid = (0 until quadTexCoords.capacity()).all { quadTexCoords.get(it).isFinite() }
+            // Black, and tried again on the next frame, rather than the camera drawn as noise.
+            if (!texCoordsValid) return
         }
-        if (frame.timestamp == 0L) return // No frame yet; drawing would flash a garbage texture.
 
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         GLES20.glDepthMask(false)

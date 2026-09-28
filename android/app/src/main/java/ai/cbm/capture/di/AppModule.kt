@@ -5,6 +5,8 @@ import ai.cbm.capture.data.capture.CaptureAssembler
 import ai.cbm.capture.data.local.CbmDatabase
 import ai.cbm.capture.data.local.OutboxDao
 import ai.cbm.capture.BuildConfig
+import ai.cbm.capture.data.remote.ASSISTANT_PATH
+import ai.cbm.capture.data.remote.ASSISTANT_READ_TIMEOUT_SECONDS
 import ai.cbm.capture.data.remote.AppApi
 import ai.cbm.capture.data.remote.appConverterFactory
 import android.content.Context
@@ -50,6 +52,14 @@ object AppModule {
         // forwarding it; this header tells ngrok the caller is an app, not a browser.
         .addInterceptor { chain ->
             chain.proceed(chain.request().newBuilder().header("ngrok-skip-browser-warning", "1").build())
+        }
+        // The building assistant may think for a while before it answers.
+        .addInterceptor { chain ->
+            if (chain.request().url.encodedPath.endsWith(ASSISTANT_PATH)) {
+                chain.withReadTimeout(ASSISTANT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS).proceed(chain.request())
+            } else {
+                chain.proceed(chain.request())
+            }
         }
         .build()
 

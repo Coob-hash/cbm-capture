@@ -37,8 +37,9 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- The site's QR poster: cbmapp://join?site=<code>. The phone's camera app opens it
-                 here; the code becomes the site of the sign-up. -->
+            <!-- The site's QR poster: cbmapp://join?site=<code>. A phone's camera app may open it
+                 here (the Join screen also scans it itself); the code becomes the site of the
+                 sign-up. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

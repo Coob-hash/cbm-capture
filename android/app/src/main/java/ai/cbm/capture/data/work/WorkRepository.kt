@@ -5,6 +5,8 @@ import ai.cbm.capture.data.remote.apiError
 import ai.cbm.capture.data.remote.bearer
 import ai.cbm.capture.data.remote.networkMessage
 import ai.cbm.capture.data.session.SessionStore
+import ai.cbm.capture.domain.model.AssistantRequest
+import ai.cbm.capture.domain.model.AssistantResponse
 import ai.cbm.capture.domain.model.DecisionRequest
 import ai.cbm.capture.domain.model.DecisionResponse
 import ai.cbm.capture.domain.model.FmAction
@@ -82,6 +84,10 @@ class WorkRepository @Inject constructor(
             )
         }
     }
+
+    /** A question to the building assistant: the workflows' FM agent, the one in their own chat. */
+    suspend fun ask(question: String): WorkResult<AssistantResponse> =
+        call { api.fmAssistant(bearer(it), AssistantRequest(question.trim())) }
 
     suspend fun technicianJobs(): WorkResult<TechnicianJobsResponse> = call { api.technicianJobs(bearer(it)) }
 

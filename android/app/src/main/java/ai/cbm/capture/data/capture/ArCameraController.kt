@@ -55,6 +55,7 @@ class ArCameraController : GLSurfaceView.Renderer {
     private val backgroundRenderer = BackgroundRenderer()
     private var session: Session? = null
     private var textureAttached = false
+    private val geometry = DisplayGeometry()
 
     private val _trackingState = MutableStateFlow(TrackingState.NOT_AVAILABLE)
     val trackingState: StateFlow<TrackingState> = _trackingState.asStateFlow()
@@ -76,6 +77,7 @@ class ArCameraController : GLSurfaceView.Renderer {
     fun attach(session: Session) {
         this.session = session
         textureAttached = false
+        geometry.invalidate()
     }
 
     fun detach() {
@@ -83,9 +85,8 @@ class ArCameraController : GLSurfaceView.Renderer {
         textureAttached = false
     }
 
-    fun setDisplayGeometry(rotation: Int, width: Int, height: Int) {
-        session?.setDisplayGeometry(rotation, width, height)
-    }
+    /** Any thread. The session gets it on the GL thread, before the next frame (see [DisplayGeometry]). */
+    fun setDisplayGeometry(rotation: Int, width: Int, height: Int) = geometry.set(rotation, width, height)
 
     // ---- Capture ----
 
@@ -118,6 +119,7 @@ class ArCameraController : GLSurfaceView.Renderer {
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
+        geometry.setSize(width, height)
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -128,6 +130,8 @@ class ArCameraController : GLSurfaceView.Renderer {
             session.setCameraTextureName(backgroundRenderer.textureId)
             textureAttached = true
         }
+        // Before update(): the frame it returns is then drawn, and a tap mapped, with this geometry.
+        geometry.takeChange()?.let { session.setDisplayGeometry(it.rotation, it.width, it.height) }
 
         val frame = try {
             session.update()

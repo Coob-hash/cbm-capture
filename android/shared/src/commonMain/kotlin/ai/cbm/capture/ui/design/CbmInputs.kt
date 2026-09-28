@@ -6,8 +6,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -25,19 +32,35 @@ fun FieldLabel(text: String) {
     Spacer(Modifier.height(6.dp))
 }
 
+/**
+ * A one-line field. A [secret] one shows dots, with an eye to show what was typed: open while the
+ * characters show, closed while they are dots. It always starts closed.
+ */
 @Composable
 fun CbmField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, placeholder: String = "", secret: Boolean = false, mono: Boolean = false) {
     val accent = LocalAccent.current.color
+    var shown by remember { mutableStateOf(false) }
     Column(modifier) {
         FieldLabel(label)
         OutlinedTextField(
             value = value, onValueChange = onChange, modifier = Modifier.fillMaxWidth(),
             placeholder = { Text(placeholder, color = CbmPalette.Steel300) },
             textStyle = if (mono) LocalTechStyles.current.ticketId else MaterialTheme.typography.bodyLarge,
-            visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+            visualTransformation = if (secret && !shown) PasswordVisualTransformation() else VisualTransformation.None,
+            trailingIcon = if (secret) {
+                {
+                    IconButton(onClick = { shown = !shown }) {
+                        Icon(
+                            if (shown) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                            contentDescription = if (shown) "Hide password" else "Show password",
+                            tint = CbmPalette.Steel400
+                        )
+                    }
+                }
+            } else null,
             // Masking the characters is not enough: the keyboard must also be told it is a password,
             // or it treats it as ordinary text - autocorrect, suggestions, learning what is typed
-            // (third audit 2026-09-25, finding 8).
+            // (third audit 2026-09-25, finding 8). Still so while the characters are shown.
             keyboardOptions = if (secret) SECRET_KEYBOARD else KeyboardOptions.Default,
             singleLine = true,
             shape = RoundedCornerShape(3.dp),

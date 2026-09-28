@@ -16,7 +16,9 @@ import ai.cbm.capture.ui.auth.ChooseRoleScreen
 import ai.cbm.capture.ui.auth.LoginScreen
 import ai.cbm.capture.ui.auth.SignUpScreen
 import ai.cbm.capture.ui.auth.WaitingScreen
+import ai.cbm.capture.domain.model.ChatLine
 import ai.cbm.capture.ui.fm.FmHomeScreen
+import ai.cbm.capture.ui.fm.FmNotificationsScreen
 import ai.cbm.capture.ui.fm.FmUiState
 import ai.cbm.capture.ui.reports.HomeItem
 import ai.cbm.capture.ui.reports.ReporterHomeScreen
@@ -202,9 +204,19 @@ fun main(args: Array<String>) {
                 counts = FmCounts(awaitingAuthorization = 1, awaitingApproval = 1, inProgress = 6, open = 8, closed7d = 4),
                 authorizations = listOf(authorization()),
                 completions = listOf(completion()),
-                loading = false
+                loading = false,
+                chat = listOf(
+                    ChatLine(fromFm = true, text = "Which tickets are still open after a month?"),
+                    ChatLine(fromFm = false, text = "**None.** Every open ticket is younger than 30 days; the oldest is #41, 12 days.")
+                )
             ),
-            onRefresh = {}, onDecide = { _, _, _ -> }, onProfile = {}
+            onRefresh = {}, onDecide = { _, _, _ -> }, onNotifications = {}, onChatDraft = {}, onAsk = {}, onProfile = {}
+        )
+    }
+    shoot(dir, "04b-fm-notifications-empty", "FM") {
+        FmNotificationsScreen(
+            state = FmUiState(siteName = "Maddaloni Office", siteCode = "ROOM-POC", expiresAtMillis = hourFromNow, loading = false),
+            onBack = {}, onOpen = {}, onRefresh = {}, onProfile = {}
         )
     }
     shoot(dir, "05-technician-work", "TECHNICIAN") {

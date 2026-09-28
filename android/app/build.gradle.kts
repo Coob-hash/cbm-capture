@@ -19,8 +19,8 @@ android {
         // adaptive-icon and EncryptedSharedPreferences paths simple with no legacy branches.
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 8
+        versionName = "1.0.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The App API's public address, e.g. https://<your-ngrok-domain>/ . Kept out of Git: set
@@ -86,6 +86,8 @@ dependencies {
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
+    // Also the Join screen's scanner: the site's QR poster, read in the app.
+    implementation(libs.zxing.core)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)

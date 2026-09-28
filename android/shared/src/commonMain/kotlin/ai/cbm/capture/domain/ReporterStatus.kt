@@ -25,7 +25,8 @@ enum class ReporterStatus(val code: String, val label: String, val needsAction: 
 
 /**
  * The site code that joins an account to a building. It arrives from the site's QR poster as a link
- * (cbmapp://join?site=CODE, opened by the phone's camera app) or is typed from the poster.
+ * (cbmapp://join?site=CODE, read by the Join screen's scanner or opened by the phone's camera app)
+ * or is typed from the poster.
  */
 object SiteCode {
     private val CODE = Regex("^[A-Za-z0-9_-]{8,64}$")

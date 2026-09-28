@@ -1,6 +1,8 @@
 package ai.cbm.capture.data.remote
 
 import ai.cbm.capture.domain.model.ApiError
+import ai.cbm.capture.domain.model.AssistantRequest
+import ai.cbm.capture.domain.model.AssistantResponse
 import ai.cbm.capture.domain.model.CaptureStoredResponse
 import ai.cbm.capture.domain.model.DecisionRequest
 import ai.cbm.capture.domain.model.DecisionResponse
@@ -68,6 +70,10 @@ interface AppApi {
     @POST("v1/fm/decisions")
     suspend fun fmDecide(@Header("Authorization") bearer: String, @Body body: DecisionRequest): Response<DecisionResponse>
 
+    /** A question to the building assistant. It may take a while: see [ASSISTANT_PATH]. */
+    @POST(ASSISTANT_PATH)
+    suspend fun fmAssistant(@Header("Authorization") bearer: String, @Body body: AssistantRequest): Response<AssistantResponse>
+
     // ---- The technician's jobs -------------------------------------------------------------------
 
     @GET("v1/technician/jobs")
@@ -103,6 +109,13 @@ interface AppApi {
 }
 
 fun bearer(token: String) = "Bearer $token"
+
+/**
+ * The building assistant's address. Its answer can take more than a minute - the agent may look
+ * several things up first, and the server gives it two - so this one call waits longer than the rest.
+ */
+const val ASSISTANT_PATH = "v1/fm/assistant"
+const val ASSISTANT_READ_TIMEOUT_SECONDS = 150
 
 /** The API's error body ({"error","message"}), or a stand-in when there is none. */
 fun Response<*>.apiError(json: Json): ApiError =

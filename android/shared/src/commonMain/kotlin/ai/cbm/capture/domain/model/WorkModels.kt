@@ -149,6 +149,16 @@ data class DecisionResponse(
     val card: FmCard? = null
 )
 
+/** A question to the building assistant (the workflows' FM agent), and its answer. */
+@Serializable
+data class AssistantRequest(val message: String)
+
+@Serializable
+data class AssistantResponse(val answer: String)
+
+/** One line of the conversation with the building assistant, as the FM's screen shows it. */
+data class ChatLine(val fromFm: Boolean, val text: String, val failed: Boolean = false)
+
 // ---- The technician's jobs -------------------------------------------------------------------
 
 @Serializable

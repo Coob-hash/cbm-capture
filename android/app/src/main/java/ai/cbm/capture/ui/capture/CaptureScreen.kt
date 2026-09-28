@@ -276,6 +276,12 @@ private fun ArCameraPreview(
 
     AndroidView(
         factory = { _ ->
+            // The view's rotation and size once it has been laid out, and again whenever that
+            // changes. The renderer also knows the surface's size; either way ARCore has its
+            // geometry before the first frame is drawn (DisplayGeometry).
+            glView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                controller.setDisplayGeometry(v.display?.rotation ?: 0, v.width, v.height)
+            }
             glView.setOnTouchListener { v, event ->
                 if (event.action == MotionEvent.ACTION_UP && v.width > 0 && v.height > 0) {
                     val rotation = v.display?.rotation ?: 0
@@ -287,13 +293,7 @@ private fun ArCameraPreview(
             }
             glView
         },
-        modifier = Modifier.fillMaxSize(),
-        update = { view ->
-            val rotation = view.display?.rotation ?: 0
-            if (view.width > 0 && view.height > 0) {
-                controller.setDisplayGeometry(rotation, view.width, view.height)
-            }
-        }
+        modifier = Modifier.fillMaxSize()
     )
 }
 
