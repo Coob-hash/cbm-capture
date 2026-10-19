@@ -1,0 +1,360 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Coob-hash/cbm-capture/main/contract/capture-metadata.schema.json",
+  "title": "CBM Capture Package Metadata",
+  "description": "The `metadata` part of a multipart POST /v1/captures request. Accompanies exactly one image part. Every pixel-space quantity in this document (camera.cx/cy/fx/fy, target.pixel) is expressed in the coordinate system of the image part that travels with it - never the sensor native frame, never the original pre-resize frame.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capture_id",
+    "report_id",
+    "building_id",
+    "captured_at",
+    "client",
+    "image",
+    "camera",
+    "target"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "capture_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Client-generated UUIDv4, one per photo. Stable across upload retries; the server's idempotency key."
+    },
+    "report_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Client-generated UUIDv4 for a report. The first photo and every replacement photo the server asks for carry the same report_id."
+    },
+    "building_id": {
+      "type": "string",
+      "minLength": 1,
+      "examples": [
+        "RIV-01"
+      ],
+      "description": "The site of the session. The server refuses a capture for any other site."
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2000,
+      "description": "Free-text damage description typed by the worker. Supplements, never replaces, the server's analysis of the photo."
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339, UTC, from the device clock at shutter time. Not the upload time - an outbox item may upload days later."
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "app_version",
+        "os_version",
+        "device_model"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "IOS",
+            "ANDROID"
+          ]
+        },
+        "app_version": {
+          "type": "string",
+          "examples": [
+            "1.0.7 (8)"
+          ]
+        },
+        "os_version": {
+          "type": "string",
+          "examples": [
+            "15"
+          ]
+        },
+        "device_model": {
+          "type": "string",
+          "examples": [
+            "Pixel 8 Pro",
+            "SM-S921B"
+          ],
+          "description": "Raw model identifier, so that accuracy can be analysed per device."
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "mime_type",
+        "sha256",
+        "byte_length",
+        "orientation_applied"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Width of the transmitted image part, measured after all transforms."
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mime_type": {
+          "enum": [
+            "image/jpeg"
+          ]
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Hex SHA-256 of the transmitted image bytes. The server rejects the package if it disagrees."
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "orientation_applied": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "description": "Quarter-turns clockwise already baked into the pixels, relative to the sensor native frame. The EXIF orientation tag is always 1 (normal): rotation is applied to the pixel data, not deferred to a tag, so that no downstream consumer can disagree about which frame K belongs to."
+        },
+        "source_width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Sensor-native width before rotate/resize. Provenance only."
+        },
+        "source_height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "scale": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Uniform downscale factor applied after rotation. Provenance only - K is already scaled."
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "trusted",
+        "fx",
+        "fy",
+        "cx",
+        "cy",
+        "width",
+        "height"
+      ],
+      "description": "Pinhole intrinsics in the transmitted image pixel frame, in conventional computer-vision notation (fx, fy, cx, cy).",
+      "properties": {
+        "source": {
+          "enum": [
+            "ARKIT",
+            "ARCORE",
+            "ANDROID_CAMERA2",
+            "EXIF",
+            "MANUAL_OVERRIDE"
+          ],
+          "description": "Provenance of K, in descending order of trust. Persisted so every localized report can be audited by how its camera was calibrated."
+        },
+        "trusted": {
+          "type": "boolean",
+          "description": "False when K came from a fallback that failed the plausibility gate. An untrusted K must send the report to manual localization rather than being silently unprojected."
+        },
+        "fx": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fy": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cx": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cy": {
+          "type": "number",
+          "minimum": 0
+        },
+        "skew": {
+          "type": "number",
+          "default": 0,
+          "description": "Camera2 reports a skew term; ARKit and ARCore are always 0. The ray math ignores it - carried for completeness only."
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must equal image.width. The server enforces this."
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must equal image.height."
+        },
+        "lens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "wide",
+            "ultrawide",
+            "telephoto"
+          ],
+          "description": "Which physical lens produced the frame, when the platform reports it."
+        },
+        "distortion": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number"
+          },
+          "description": "Radial/tangential coefficients when available. Not applied: the pipeline assumes a pinhole model and gates on frame position instead."
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pixel",
+        "source"
+      ],
+      "description": "Where the worker says the defect is: the pixel the ray is cast from.",
+      "properties": {
+        "pixel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "x",
+            "y"
+          ],
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "source": {
+          "enum": [
+            "USER_TAP"
+          ]
+        },
+        "centrality": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "0 at the frame centre, 1 at the edge, as max(|x/W-0.5|, |y/H-0.5|)/0.5. Captures above ~0.6 are flagged because pinhole error grows toward the edge."
+        }
+      }
+    },
+    "pose": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "position",
+        "rotation",
+        "tracking_state"
+      ],
+      "description": "Advisory only. The AR session's own world pose: it is not in the building model's frame and must never be used to cast the ray. Carried so the two can be cross-checked offline.",
+      "properties": {
+        "source": {
+          "enum": [
+            "ARKIT",
+            "ARCORE"
+          ]
+        },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "x",
+            "y",
+            "z"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "z": {
+              "type": "number"
+            }
+          }
+        },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "x",
+            "y",
+            "z",
+            "w"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "z": {
+              "type": "number"
+            },
+            "w": {
+              "type": "number"
+            }
+          }
+        },
+        "tracking_state": {
+          "enum": [
+            "NORMAL",
+            "LIMITED",
+            "NOT_AVAILABLE"
+          ]
+        },
+        "coordinate_space": {
+          "type": "string",
+          "default": "AR_SESSION_WORLD"
+        }
+      }
+    }
+  }
+}

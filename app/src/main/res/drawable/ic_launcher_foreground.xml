@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A reticle over a frame corner: the app's whole job is designating one pixel in a
+  calibrated frame. Drawn as a vector so no raster densities are needed - minSdk 26
+  means the adaptive icon in mipmap-anydpi-v26 is the only variant required.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Frame corners -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="square"
+        android:pathData="M32,38 L32,32 L38,32" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="square"
+        android:pathData="M70,32 L76,32 L76,38" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="square"
+        android:pathData="M76,70 L76,76 L70,76" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="square"
+        android:pathData="M38,76 L32,76 L32,70" />
+
+    <!-- Reticle -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M54,44 A10,10 0 1,1 53.99,44" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,52.25 A1.75,1.75 0 1,1 53.99,52.25 Z" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M54,38 L54,42" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M54,66 L54,70" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M38,54 L42,54" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M66,54 L70,54" />
+</vector>

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+        with:
+          # The platform and build tools are downloaded by the Android Gradle plugin.
+          packages: platform-tools
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Lint
+        run: ./gradlew :app:lintDebug --no-daemon
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Build release APK (unsigned, minified)
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: "*/build/reports/"
+
+  contract:
+    name: API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install jsonschema
+
+      - name: Validate schema and example
+        shell: python
+        run: |
+          import json
+          from jsonschema import Draft202012Validator
+
+          schema = json.load(open("contract/capture-metadata.schema.json"))
+          example = json.load(open("contract/example-capture.json"))
+          Draft202012Validator.check_schema(schema)
+          Draft202012Validator(schema).validate(example)
+
+          image, camera, pixel = example["image"], example["camera"], example["target"]["pixel"]
+          assert (camera["width"], camera["height"]) == (image["width"], image["height"])
+          assert 0 <= pixel["x"] < image["width"] and 0 <= pixel["y"] < image["height"]
+
+          api = json.load(open("contract/openapi.json"))
+          assert "/v1/captures" in api["paths"]
+          print("Contract OK")

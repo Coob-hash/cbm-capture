@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+.kotlin/
+build/
+
+# Local configuration (SDK path, API base URL)
+local.properties
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Android
+*.apk
+*.aab
+captures/
+.cxx/
+.externalNativeBuild/
+
+# Signing
+*.jks
+*.keystore
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
